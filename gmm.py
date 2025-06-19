@@ -30,7 +30,9 @@ class BayesianExpressiveModel:
             categorical_features.append([note.rhythmic_context, note.ir_label])
             continuous_features.append([
                 note.pitch,
+                note.onset_beat,
                 note.duration_beat,
+                note.voice,
                 note.pitch_interval,
                 note.duration_ratio,
                 note.ir_closure,
@@ -127,6 +129,7 @@ class BayesianExpressiveModel:
                 pitch=note.pitch,
                 onset_beat=note.onset_beat,
                 duration_beat=note.duration_beat,
+                voice=note.voice,
                 pitch_interval=note.pitch_interval,
                 duration_ratio=note.duration_ratio,
                 rhythmic_context=note.rhythmic_context,
@@ -172,16 +175,16 @@ class BayesianExpressiveModel:
                 
                 # Apply reasonable ranges and assign to note
                 if target_name == 'beat_period':
-                    target_pred = np.clip(target_pred, 0.3, 3.0)
+                    # target_pred = np.clip(target_pred, 0.3, 3.0)
                     new_note.beat_period = target_pred
                 elif target_name == 'timing':
-                    target_pred = np.clip(target_pred, -0.5, 0.5)
+                    # target_pred = np.clip(target_pred, -0.5, 0.5)
                     new_note.timing = target_pred
                 elif target_name == 'velocity':
-                    target_pred = int(np.clip(target_pred, 1, 127))
+                    # target_pred = int(np.clip(target_pred, 0, 1))
                     new_note.velocity = target_pred
                 elif target_name == 'articulation_log':
-                    target_pred = np.clip(target_pred, -2.0, 1.0)
+                    # target_pred = np.clip(target_pred, -2.0, 1.0)
                     new_note.articulation_log = target_pred
             
             predicted_parameters.append(new_note)

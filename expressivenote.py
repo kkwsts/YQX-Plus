@@ -8,6 +8,7 @@ class ExpressiveNote:
     pitch: int
     onset_beat: float
     duration_beat: float
+    voice: int
     
     # Context features
     pitch_interval: int  # semitones to next note
