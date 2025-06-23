@@ -28,6 +28,59 @@ from flow import FMExpressiveModel
 from features import FeatureExtractor
 
 
+def get_matched_notes(spart_note_array, ppart_note_array, alignment):
+    """
+    Get the indices of the matched notes in an alignment
+
+    Parameters
+    ----------
+    spart_note_array : structured numpy array
+        note_array of the score part
+    ppart_note_array : structured numpy array
+        note_array of the performed part
+    alignment : list
+        The score--performance alignment, a list of dictionaries.
+        (see `partitura.io.importmatch.alignment_from_matchfile` for reference)
+
+    Returns
+    -------
+    matched_idxs : np.ndarray
+        A 2D array containing the indices of the matched score and
+        performed notes, where the columns are
+        (index_in_score_note_array, index_in_performance_notearray)
+    """
+    # Get matched notes
+    matched_idxs = []
+    for al in alignment:
+        # Get only matched notes (i.e., ignore inserted or deleted notes)
+        if al["label"] == "match":
+            # if ppart_note_array['id'].dtype != type(al['performance_id']):
+            if not isinstance(ppart_note_array["id"], type(al["performance_id"])):
+                p_id = str(al["performance_id"])
+            else:
+                p_id = al["performance_id"]
+
+            p_idx = np.where(ppart_note_array["id"] == p_id)[0]
+
+            s_idx = np.where(spart_note_array["id"] == al["score_id"])[0]
+
+            if len(s_idx) > 0 and len(p_idx) > 0:
+                s_idx = int(s_idx)
+                p_idx = int(p_idx)
+                matched_idxs.append((s_idx, p_idx))
+
+    if len(matched_idxs) == 0:
+        warnings.warn(
+            "No matched note IDs found. "
+            "Either the alignment contains no matches "
+            "or the IDs in score of performance do not correspond to the alignment "
+            "(maybe due to repeat unfolding)."
+        )
+
+    return np.array(matched_idxs)
+
+
+
 class YQXSystem:
     """Complete YQX expressive performance system"""
     
@@ -175,7 +228,7 @@ class YQXSystem:
                 
                 snote_array = score_part.note_array()
                 pnote_array = performed_part.note_array()
-                matched_note_idxs = pt.musicanalysis.get_matched_notes(snote_array, pnote_array, alignment)
+                matched_note_idxs = get_matched_notes(snote_array, pnote_array, alignment)
                 parameters, _ = pt.musicanalysis.encode_performance(snote_array, pnote_array, alignment)
                 
                 matched_snote_array = snote_array[matched_note_idxs[:, 0]]
