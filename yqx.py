@@ -25,276 +25,13 @@ warnings.filterwarnings('ignore')
 from expressivenote import ExpressiveNote  
 from gmm import BayesianExpressiveModel
 from flow import FMExpressiveModel
+from features import FeatureExtractor
 
-
-class FeatureExtractor:
-    """Extract musical context features from note arrays"""
-    
-    def __init__(self):
-        self.ir_categories = [
-            'Process', 'Reversal', 'Registral_Return', 'Intervallic_Duplication'
-        ]
-    
-    def extract_voices(self, note_array: np.ndarray) -> List[np.ndarray]:
-        """Extract all voices sorted from highest to lowest pitch"""
-        # Group notes by voice
-        unique_voices = np.unique(note_array['voice'])
-        voice_groups = {}
-        
-        # Collect notes for each voice
-        for voice in unique_voices:
-            voice_notes = note_array[note_array['voice'] == voice]
-            if len(voice_notes) > 0:
-                # Calculate average pitch for this voice
-                avg_pitch = np.mean(voice_notes['pitch'])
-                voice_groups[voice] = {
-                    'notes': voice_notes,
-                    'avg_pitch': avg_pitch
-                }
-        
-        # Sort voices by average pitch (highest to lowest)
-        if len(voice_groups) > 0:
-            sorted_voices = sorted(voice_groups.keys(),
-                                 key=lambda v: voice_groups[v]['avg_pitch'],
-                                 reverse=True)
-            
-            # Create list of sorted voice note arrays
-            voice_note_arrays = []
-            for voice in sorted_voices:
-                voice_notes = voice_groups[voice]['notes']
-                # Sort notes within each voice by onset beat
-                sort_idx = np.argsort(voice_notes['onset_beat'])
-                voice_notes = voice_notes[sort_idx]
-                voice_note_arrays.append(voice_notes)
-                
-            return voice_note_arrays
-        else:
-            return [np.array([], dtype=note_array.dtype)]
-    
-    def compute_rhythmic_context(self, durations: np.ndarray, idx: int) -> str:
-        """Compute rhythmic context (e.g., 's-s-l' for short-short-long)"""
-        if idx == 0 or idx >= len(durations) - 1:
-            return "boundary"
-        
-        # Categorize durations relative to neighbors
-        prev_dur = durations[idx-1]
-        curr_dur = durations[idx]
-        next_dur = durations[idx+1]
-        
-        def categorize_duration(dur, ref_dur):
-            ratio = dur / ref_dur if ref_dur > 0 else 1.0
-            if ratio < 0.75:
-                return 's'  # short
-            elif ratio > 1.33:
-                return 'l'  # long
-            else:
-                return 'm'  # medium
-        
-        prev_cat = categorize_duration(prev_dur, curr_dur)
-        next_cat = categorize_duration(next_dur, curr_dur)
-        
-        return f"{prev_cat}-{next_cat}"
-    
-    def compute_ir_analysis(self, pitches: np.ndarray, idx: int) -> Tuple[str, float]:
-        """Simplified Implication-Realization analysis"""
-        if idx == 0 or idx >= len(pitches) - 2:
-            return "boundary", 0.0
-        
-        # Analyze melodic intervals
-        int1 = pitches[idx] - pitches[idx-1]
-        int2 = pitches[idx+1] - pitches[idx]
-        
-        # Simplified IR categorization
-        if abs(int1) <= 2 and abs(int2) <= 2:
-            ir_label = "Process"
-            closure = -0.5  # Low closure (continuing)
-        elif int1 * int2 < 0:  # Direction change
-            ir_label = "Reversal"
-            closure = 0.3  # Medium closure
-        elif abs(int1) > 4 or abs(int2) > 4:  # Large intervals
-            ir_label = "Registral_Return"
-            closure = 0.7  # High closure
-        else:
-            ir_label = "Intervallic_Duplication"
-            closure = 0.0
-        
-        return ir_label, closure
-    
-    def detect_phrase_boundaries(self, note_array: np.ndarray) -> List[int]:
-        """Simple phrase boundary detection based on rests and large intervals"""
-        boundaries = [0]
-        
-        for i in range(1, len(note_array)):
-            # Check for rest (gap in onset times)
-            prev_end = note_array[i-1]['onset_beat'] + note_array[i-1]['duration_beat']
-            curr_start = note_array[i]['onset_beat']
-            
-            if curr_start - prev_end > 0.5:  # Rest longer than half beat
-                boundaries.append(i)
-            
-            # Check for large pitch jump
-            pitch_diff = abs(note_array[i]['pitch'] - note_array[i-1]['pitch'])
-            if pitch_diff > 12:  # Octave or more
-                boundaries.append(i)
-        
-        boundaries.append(len(note_array))
-        return sorted(list(set(boundaries)))
-    
-    def extract_features(self, score_notes: np.ndarray, parameters: Optional[np.ndarray] = None, 
-                         plot: Optional[bool] = False) -> List[ExpressiveNote]:
-        """Extract features from score and parameters (if available)"""
-        voices = self.extract_voices(score_notes)
-        phrase_boundaries = self.detect_phrase_boundaries(score_notes)
-
-        expressive_notes = []
-        
-        for voice_notes in voices:
-            for i, note in enumerate(voice_notes):
-                # Basic note information
-                pitch = note['pitch']
-                onset_beat = note['onset_beat']
-                duration_beat = note['duration_beat']
-                voice = note['voice']
-                
-                # Context features
-                if i < len(voice_notes) - 1:
-                    pitch_interval = voice_notes[i+1]['pitch'] - pitch
-                    duration_ratio = voice_notes[i+1]['duration_beat'] / duration_beat if duration_beat > 0 else 1.0
-                else:
-                    pitch_interval = 0
-                    duration_ratio = 1.0
-                
-                rhythmic_context = self.compute_rhythmic_context(voice_notes['duration_beat'], i)
-                ir_label, ir_closure = self.compute_ir_analysis(voice_notes['pitch'], i)
-                
-                # Position in phrase
-                phrase_idx = 0
-                for j, boundary in enumerate(phrase_boundaries[:-1]):
-                    if boundary <= i < phrase_boundaries[j+1]:
-                        phrase_idx = j
-                        break
-                
-                phrase_start = phrase_boundaries[phrase_idx]
-                phrase_end = phrase_boundaries[phrase_idx + 1]
-                position_in_phrase = (i - phrase_start) / max(1, phrase_end - phrase_start)
-                
-                # Expressive targets (if performance data available)
-                beat_period = None
-                timing = None
-                velocity = None
-                articulation_log = None
-                
-                if parameters is not None and i < len(parameters):
-                    perf_param = parameters[i]
-                    
-                    # Timing ratio (IOI ratio)
-                    beat_period = perf_param['beat_period'] 
-                    timing = perf_param['timing'] 
-                    
-                    # Loudness (velocity)
-                    velocity = perf_param['velocity']
-                    
-                    # Articulation ratio
-                    articulation_log = perf_param['articulation_log'] 
-                
-                expressive_note = ExpressiveNote(
-                    pitch=pitch,
-                    onset_beat=onset_beat,
-                    duration_beat=duration_beat,
-                    voice=voice,
-                    pitch_interval=pitch_interval,
-                    duration_ratio=duration_ratio,
-                    rhythmic_context=rhythmic_context,
-                    ir_label=ir_label,
-                    ir_closure=ir_closure,
-                    position_in_phrase=position_in_phrase,
-                    beat_period=beat_period,
-                    timing=timing,
-                    velocity=velocity,
-                    articulation_log=articulation_log
-                )
-                
-                expressive_notes.append(expressive_note)
-
-        return expressive_notes
-
-
-    def plot_features(self, expressive_notes, save_path):
-        """Plot expressive parameters for visualization
-        
-        Args:
-            expressive_notes: List of ExpressiveNote objects containing expressive parameters
-        """
-        import matplotlib.pyplot as plt
-        
-        # Group notes by voice
-        voice_groups = {}
-        for note in expressive_notes:
-            if note.voice not in voice_groups:
-                voice_groups[note.voice] = {
-                    'onsets': [],
-                    'beat_periods': [],
-                    'timings': [],
-                    'velocities': [],
-                    'articulations': []
-                }
-            voice_groups[note.voice]['onsets'].append(note.onset_beat)
-            voice_groups[note.voice]['beat_periods'].append(note.beat_period)
-            voice_groups[note.voice]['timings'].append(note.timing)
-            voice_groups[note.voice]['velocities'].append(note.velocity)
-            voice_groups[note.voice]['articulations'].append(note.articulation_log)
-
-        # Create figure with 4 subplots
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
-        fig.suptitle('Expressive Parameters')
-
-        # Colors for different voices
-        colors = ['b', 'r', 'g', 'm', 'c', 'y', 'k']
-
-        # Plot each voice in each subplot
-        for i, (voice, data) in enumerate(voice_groups.items()):
-            color = colors[i % len(colors)]
-            label = f'Voice {voice}'
-
-            # Plot beat period
-            ax1.plot(data['onsets'], data['beat_periods'], f'{color}.-', label=label, alpha=0.5)
-            ax1.set_xlabel('Score Time (beats)')
-            ax1.set_ylabel('Beat Period (s)')
-            ax1.set_title('Tempo')
-            ax1.grid(True)
-            ax1.legend()
-
-            # Plot timing
-            ax2.plot(data['onsets'], data['timings'], f'{color}.-', label=label, alpha=0.5)
-            ax2.set_xlabel('Score Time (beats)')
-            ax2.set_ylabel('Timing Deviation (s)')
-            ax2.set_title('Timing')
-            ax2.grid(True)
-            ax2.legend()
-
-            # Plot velocity
-            ax3.plot(data['onsets'], data['velocities'], f'{color}.-', label=label, alpha=0.5)
-            ax3.set_xlabel('Score Time (beats)')
-            ax3.set_ylabel('Velocity (0-127)')
-            ax3.set_title('Dynamics')
-            ax3.grid(True)
-            ax3.legend()
-
-            # Plot articulation
-            ax4.plot(data['onsets'], data['articulations'], f'{color}.-', label=label, alpha=0.5)
-            ax4.set_xlabel('Score Time (beats)')
-            ax4.set_ylabel('Log Articulation Ratio')
-            ax4.set_title('Articulation')
-            ax4.grid(True)
-            ax4.legend()
-
-        plt.tight_layout()
-        plt.savefig(save_path)
 
 class YQXSystem:
     """Complete YQX expressive performance system"""
     
-    def __init__(self, data_dir: str, asap_dir: Optional[str] = None):
+    def __init__(self, data_dir: str, asap_dir: Optional[str] = None, use_midihum_features: bool = False):
         self.data_dir = data_dir
         self.musicxml_dir = os.path.join(data_dir, "musicxml")
         self.match_dir = os.path.join(data_dir, "match")
@@ -305,6 +42,7 @@ class YQXSystem:
             
         self.feature_extractor = FeatureExtractor()
         self.model = BayesianExpressiveModel(n_components=48)
+        self.use_midihum_features = use_midihum_features
 
     def get_asap_aligned_note_arrays(self, split='train', split_csv_path=None):
         """Load ASAP aligned note arrays with encoded performance parameters
@@ -460,16 +198,22 @@ class YQXSystem:
         # Extract features for all performances
         training_notes = []
         for idx, (score_notes, perf_params) in enumerate(note_pairs):
-            expressive_notes = self.feature_extractor.extract_features(score_notes, perf_params)
+            expressive_notes = self.feature_extractor.extract_features(
+                score_notes, 
+                perf_params, 
+                use_midihum_features=self.use_midihum_features
+            )
             if idx == 0:
-                self.feature_extractor.plot_features(expressive_notes, "train_params.png")
+                self.feature_extractor.plot_targets(expressive_notes, "train_params.png")
             training_notes.append(expressive_notes)
         
         # Train model
         t0 = time.time()
-        self.model.train(training_notes)
+        self.model.train(training_notes, self.feature_extractor)
         print(f"Training time: {time.time() - t0} seconds")
         
+        # Save feature encoders along with model
+        self.feature_extractor.save_encoders("feature_encoders.pkl")
     
     def render_performance(self, musicxml_path: str, output_midi_path: str):
         """Render expressive performance of a MusicXML score"""
@@ -486,12 +230,15 @@ class YQXSystem:
         
         # Extract features
         print("Extracting features...")
-        expressive_notes = self.feature_extractor.extract_features(score_notes)
+        expressive_notes = self.feature_extractor.extract_features(
+            score_notes, 
+            use_midihum_features=self.use_midihum_features
+        )
         
         # Predict expressive parameters
         print("Predicting expressive parameters...")
-        predicted_expressive_notes = self.model.predict(expressive_notes)
-        self.feature_extractor.plot_features(predicted_expressive_notes, "pred_params.png")
+        predicted_expressive_notes = self.model.predict(expressive_notes, self.feature_extractor)
+        self.feature_extractor.plot_targets(predicted_expressive_notes, "pred_params.png")
         
         # Generate MIDI
         print("Generating MIDI...")
@@ -553,12 +300,14 @@ class YQXSystem:
 
         
     def save_model(self, filepath: str):
-        """Save trained model"""
+        """Save trained model and feature encoders"""
         self.model.save(filepath)
+        self.feature_extractor.save_encoders(filepath + ".encoders")
     
     def load_model(self, filepath: str):
-        """Load trained model"""
+        """Load trained model and feature encoders"""
         self.model.load(filepath)
+        self.feature_extractor.load_encoders(filepath + ".encoders")
 
 # Example usage
 def main():
@@ -586,12 +335,14 @@ def main():
                       help='Render a performance from input score')
     parser.add_argument('--use_asap', action='store_true',
                       help='Use ASAP dataset during training')
+    parser.add_argument('--use_midihum', action='store_true',
+                      help='Use additional midihum features')
     
     args = parser.parse_args()
     
     # Initialize system with ASAP only if use_asap is True
     asap_dir = args.asap_dir if args.use_asap else None
-    yqx = YQXSystem(args.data_dir, asap_dir)
+    yqx = YQXSystem(args.data_dir, asap_dir, use_midihum_features=args.use_midihum)
     
     # Train if requested
     if args.train:

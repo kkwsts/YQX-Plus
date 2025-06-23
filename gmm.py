@@ -17,50 +17,9 @@ class BayesianExpressiveModel:
     def __init__(self, n_components: int = 8):
         self.n_components = n_components
         self.models = {}  # One model per target variable
-        self.scalers = {}
-        self.feature_encoders = {}
         self.trained = False
     
-    def _encode_categorical_features(self, notes: List[ExpressiveNote], fit: bool = False) -> np.ndarray:
-        """Encode categorical features to numerical"""
-        categorical_features = []
-        continuous_features = []
-        
-        for note in notes:
-            categorical_features.append([note.rhythmic_context, note.ir_label])
-            continuous_features.append([
-                note.pitch,
-                note.onset_beat,
-                note.duration_beat,
-                note.voice,
-                note.pitch_interval,
-                note.duration_ratio,
-                note.ir_closure,
-                note.position_in_phrase
-            ])
-        
-        # Encode categorical features
-        if fit:
-            # Create encodings
-            unique_rhythmic = list(set(f[0] for f in categorical_features))
-            unique_ir = list(set(f[1] for f in categorical_features))
-            
-            self.feature_encoders['rhythmic_context'] = {v: i for i, v in enumerate(unique_rhythmic)}
-            self.feature_encoders['ir_label'] = {v: i for i, v in enumerate(unique_ir)}
-        
-        # Apply encodings
-        encoded_categorical = []
-        for features in categorical_features:
-            rhythmic_encoded = self.feature_encoders['rhythmic_context'].get(features[0], 0)
-            ir_encoded = self.feature_encoders['ir_label'].get(features[1], 0)
-            encoded_categorical.append([rhythmic_encoded, ir_encoded])
-        
-        # Combine features
-        all_features = np.hstack([np.array(encoded_categorical), np.array(continuous_features)])
-        
-        return all_features
-    
-    def train(self, training_notes: List[List[ExpressiveNote]]):
+    def train(self, training_notes: List[List[ExpressiveNote]], feature_extractor):
         """Train the Bayesian model on training data"""
         print("Training YQX model...")
         
@@ -78,12 +37,8 @@ class BayesianExpressiveModel:
         
         print(f"Training on {len(training_notes_filtered)} notes")
         
-        # Extract features
-        X = self._encode_categorical_features(training_notes_filtered, fit=True)
-        
-        # Scale features
-        self.scalers['features'] = StandardScaler()
-        X_scaled = self.scalers['features'].fit_transform(X)
+        # Extract and encode features
+        X = feature_extractor.encode_features(training_notes_filtered, fit=True)
 
         # Extract targets
         targets = {
@@ -97,15 +52,11 @@ class BayesianExpressiveModel:
         for target_name, y in targets.items():
             print(f"Training {target_name} model...")
             
-            # Scale targets
-            self.scalers[target_name] = StandardScaler()
-            y_scaled = self.scalers[target_name].fit_transform(y.reshape(-1, 1)).flatten()
-            
             # Train Gaussian Mixture Model
             model = GaussianMixture(n_components=self.n_components, random_state=42)
             
             # Combine features and targets for joint modeling
-            joint_data = np.column_stack([X_scaled, y_scaled])
+            joint_data = np.column_stack([X, y])
             model.fit(joint_data)
             
             self.models[target_name] = model
@@ -113,14 +64,13 @@ class BayesianExpressiveModel:
         self.trained = True
         print("Training completed!")
     
-    def predict(self, notes: List[ExpressiveNote]) -> List[ExpressiveNote]:
+    def predict(self, notes: List[ExpressiveNote], feature_extractor) -> List[ExpressiveNote]:
         """Predict expressive parameters for new notes"""
         if not self.trained:
             raise ValueError("Model must be trained before prediction")
         
-        # Extract features
-        X = self._encode_categorical_features(notes, fit=False)
-        X_scaled = self.scalers['features'].transform(X)
+        # Extract and encode features
+        X = feature_extractor.encode_features(notes, fit=False)
         
         # Predict each target
         predicted_parameters = []
@@ -144,7 +94,7 @@ class BayesianExpressiveModel:
                 
                 # Use conditional expectation given features
                 # Approximate by finding most likely component and using its mean
-                features = X_scaled[i:i+1]
+                features = X[i:i+1]
                 
                 # Find most likely component
                 log_probs = []
@@ -168,10 +118,7 @@ class BayesianExpressiveModel:
                 
                 # Predict target using conditional mean
                 target_mean = model.means_[best_comp, -1]  # Last dimension is target
-                target_pred_scaled = target_mean
-                
-                # Unscale prediction
-                target_pred = self.scalers[target_name].inverse_transform([[target_pred_scaled]])[0, 0]
+                target_pred = target_mean
                 
                 # Apply reasonable ranges and assign to note
                 if target_name == 'beat_period':
@@ -195,8 +142,6 @@ class BayesianExpressiveModel:
         """Save trained model"""
         model_data = {
             'models': self.models,
-            'scalers': self.scalers,
-            'feature_encoders': self.feature_encoders,
             'n_components': self.n_components,
             'trained': self.trained
         }
@@ -209,8 +154,6 @@ class BayesianExpressiveModel:
             model_data = pickle.load(f)
         
         self.models = model_data['models']
-        self.scalers = model_data['scalers']
-        self.feature_encoders = model_data['feature_encoders']
         self.n_components = model_data['n_components']
         self.trained = model_data['trained']
 
