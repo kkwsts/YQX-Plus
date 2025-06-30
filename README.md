@@ -32,23 +32,25 @@ pip install -r requirements.txt
 ### Training the Model
 
 ```bash
-python yqx.py --train  [--use_asap --asap_dir <path_to_asap>]
+python yqx.py train.enabled=True data.use_asap=True data.asap_dir=<path_to_asap>
 ```
 
-- `--train`: Train the model
-- `--use_asap`: (Optional) Use ASAP dataset for training
-- `--asap_dir`: (Optional) Path to ASAP dataset directory
-- `--use_midihum`: (Optional) Use MIDIHUM features
+- `train.enabled`: Train the model
+- `data.use_asap`: (Optional) Use ASAP dataset for training
+- `data.asap_dir`: (Optional) Path to ASAP dataset directory
+- `data.use_midihum`: (Optional) Use MIDIHUM features
 
 ### Rendering an Expressive Performance
 
 ```bash
-python yqx.py --render --input_score <path_to_musicxml> --output_midi <output_midi_path> --model_path <model_file>
+python yqx.py render.enabled=True render.input_score=<path_to_musicxml> render.output_midi=<output_midi_path> render.model_path=<model_file> render.initial_tempo=<initial_tempo>
 ```
 
-- `--input_score`: Path to input MusicXML score
-- `--output_midi`: Path for output MIDI file
-- `--model_path`: Path to trained model file (default: yqx_model.pkl)
+- `render.enabled`: Render the performance
+- `render.input_score`: Path to input MusicXML score
+- `render.output_midi`: Path for output MIDI file
+- `render.model_path`: Path to trained model file (default: yqx_model.pkl)
+- `render.initial_tempo`: Initial tempo in bpm for rendering (default: 120, we have standardized the time parameters to 120 in training) 
 
 ### Features 
 

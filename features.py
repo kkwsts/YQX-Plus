@@ -730,6 +730,33 @@ class FeatureExtractor:
         plt.savefig(save_path)
 
 
+    def standardize_targets(self, score_notes: np.ndarray, perf_params: np.ndarray):
+        """filter out outliers, scale the time parameters (beat_period and timing) into with 120 bpm. 
+            When inferencing, the user will provide initial tempo to scale the time parameters"""
+        # Filter out outliers 3 standard deviations from mean
+        for param in ['beat_period', 'timing']:
+            if param in perf_params.dtype.names:
+                values = perf_params[param]
+                mean = np.mean(values)
+                std = np.std(values)
+                mask = np.abs(values - mean) <= 3 * std
+                perf_params = perf_params[mask]
+                score_notes = score_notes[mask]
+
+        # Scale time parameters to 120 BPM (0.5 seconds per beat)
+        if 'beat_period' in perf_params.dtype.names:
+            # Get average tempo
+            avg_tempo = 60 / np.mean(perf_params['beat_period'])
+            # Scale factor to convert to 120 BPM
+            scale = avg_tempo / 120
+            
+            # Scale beat period and timing
+            perf_params['beat_period'] = perf_params['beat_period'] * scale
+            perf_params['timing'] = perf_params['timing'] * scale
+                
+        return score_notes, perf_params, avg_tempo
+        
+
 class MidiHumFeatureEngineer:
     """
     Feature engineering inspired by the midihum/midi_to_df_conversion.py _add_engineered_features function.

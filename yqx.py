@@ -12,14 +12,12 @@ import numpy as np
 import pandas as pd
 from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
-import pickle
-from sklearn.mixture import GaussianMixture
-from sklearn.preprocessing import StandardScaler
 import partitura as pt
 from tqdm import tqdm
-import pretty_midi
+import matplotlib.pyplot as plt 
 import hook
 import warnings
+from omegaconf import OmegaConf, DictConfig
 warnings.filterwarnings('ignore')
 
 from expressivenote import ExpressiveNote  
@@ -84,18 +82,31 @@ def get_matched_notes(spart_note_array, ppart_note_array, alignment):
 class YQXSystem:
     """Complete YQX expressive performance system"""
     
-    def __init__(self, data_dir: str, asap_dir: Optional[str] = None, use_midihum_features: bool = False):
-        self.data_dir = data_dir
-        self.musicxml_dir = os.path.join(data_dir, "musicxml")
-        self.match_dir = os.path.join(data_dir, "match")
+    def __init__(self, config: DictConfig):
+        self.config = config
         
-        self.asap_dir = asap_dir
-        if asap_dir is not None:
-            self.asap_split_csv = os.path.join(asap_dir, "metadata-v1.3.csv")
-            
+        # Set up paths
+        self.data_dir = config.data.vienna4x22_dir
+        self.musicxml_dir = os.path.join(self.data_dir, "musicxml")
+        self.match_dir = os.path.join(self.data_dir, "match")
+        
+        self.asap_dir = config.data.asap_dir if config.data.use_asap else None
+        if self.asap_dir is not None:
+            self.asap_split_csv = os.path.join(self.asap_dir, "metadata-v1.3.csv")
+        
+        # Initialize components
         self.feature_extractor = FeatureExtractor()
-        self.model = BayesianExpressiveModel(n_components=48)
-        self.use_midihum_features = use_midihum_features
+        
+        # Initialize model based on config
+        if config.model.type == "gmm":
+            self.model = BayesianExpressiveModel(n_components=config.model.n_components)
+        elif config.model.type == "flow":
+            self.model = FMExpressiveModel()
+        else:
+            raise ValueError(f"Unknown model type: {config.model.type}")
+        
+        # Create artifacts directory
+        os.makedirs(config.output.artifacts_dir, exist_ok=True)
 
     def get_asap_aligned_note_arrays(self, split='train', split_csv_path=None):
         """Load ASAP aligned note arrays with encoded performance parameters
@@ -248,36 +259,46 @@ class YQXSystem:
             note_pairs.extend(self.get_asap_aligned_note_arrays('train', self.asap_split_csv))
         print(f"Loaded {len(note_pairs)} score-performance pairs")
         
-        # Extract features for all performances
-        training_notes = []
-        for idx, (score_notes, perf_params) in enumerate(note_pairs):
+        print("Extracting features for training data...")
+        training_notes, avg_tempos = [], []
+        for idx, (score_notes, perf_params) in tqdm(enumerate(note_pairs)):
+            
+            # filter out outliers and standardize the time parameters to 120 bpm
+            score_notes, perf_params, avg_tempo = self.feature_extractor.standardize_targets(score_notes, perf_params)
+            avg_tempos.append(avg_tempo)
+            
             expressive_notes = self.feature_extractor.extract_features(
                 score_notes, 
                 perf_params, 
-                use_midihum_features=self.use_midihum_features
+                use_midihum_features=self.config.model.use_midihum_features
             )
-            if idx == 0:
-                self.feature_extractor.plot_targets(expressive_notes, "train_params.png")
+            
+            if idx == 0 and self.config.output.plot_targets:
+                plot_path = os.path.join(self.config.output.artifacts_dir, "train_params.png")
+                self.feature_extractor.plot_targets(expressive_notes, plot_path)
+            
             training_notes.append(expressive_notes)
+        
+        if self.config.output.save_distributions:
+            # Save the distribution of the training notes targets and avg_tempo
+            targets_distribution = np.array([note.get_targets() for note_list in training_notes for note in note_list])
+            np.save(os.path.join(self.config.output.artifacts_dir, "targets_distribution.npy"), targets_distribution)
+            np.save(os.path.join(self.config.output.artifacts_dir, "avg_tempos.npy"), np.array(avg_tempos))
         
         # Train model
         t0 = time.time()
         self.model.train(training_notes, self.feature_extractor)
         print(f"Training time: {time.time() - t0} seconds")
         
-        # Save feature encoders along with model
-        self.feature_extractor.save_encoders("feature_encoders.pkl")
+        # Save model and encoders
+        self.save_model(self.config.model.model_path)
     
-    def render_performance(self, musicxml_path: str, output_midi_path: str):
+    def render_performance(self, musicxml_path: str = None, output_midi: str = None, initial_tempo: int = None):
         """Render expressive performance of a MusicXML score"""
         print(f"Loading score: {musicxml_path}")
         
         # Load score
-        try:
-            score_part = pt.load_musicxml(musicxml_path)[0]
-        except Exception as e:
-            print(f"Error loading MusicXML: {e}")
-            return
+        score_part = pt.load_musicxml(musicxml_path)[0]
         
         score_notes = score_part.note_array()
         
@@ -285,20 +306,23 @@ class YQXSystem:
         print("Extracting features...")
         expressive_notes = self.feature_extractor.extract_features(
             score_notes, 
-            use_midihum_features=self.use_midihum_features
+            use_midihum_features=self.config.model.use_midihum_features
         )
         
         # Predict expressive parameters
         print("Predicting expressive parameters...")
         predicted_expressive_notes = self.model.predict(expressive_notes, self.feature_extractor)
-        self.feature_extractor.plot_targets(predicted_expressive_notes, "pred_params.png")
+        
+        plot_path = os.path.join(self.config.output.artifacts_dir, "pred_params.png")
+        self.feature_extractor.plot_targets(predicted_expressive_notes, plot_path)
         
         # Generate MIDI
         print("Generating MIDI...")
-        self._generate_midi(predicted_expressive_notes, score_part, output_midi_path)
-        print(f"Expressive performance saved to: {output_midi_path}")
+        self._generate_midi(predicted_expressive_notes, score_part, output_midi, initial_tempo)
+        print(f"Expressive performance saved to: {output_midi}")
     
-    def _generate_midi(self, predicted_expressive_notes: List[ExpressiveNote], score_part: pt.score.Part, output_path: str):
+    def _generate_midi(self, predicted_expressive_notes: List[ExpressiveNote], 
+                       score_part: pt.score.Part, output_path: str, initial_tempo: float = 120):
         """Generate MIDI file using partitura's decode_performance"""
         
         # Get the score note array
@@ -334,6 +358,10 @@ class YQXSystem:
                 if pred_note.articulation_log is not None:
                     performance_params[score_idx]['articulation_log'] = pred_note.articulation_log
         
+        # scale the time parameters with user provided tempo
+        performance_params['beat_period'] = performance_params['beat_period'] / (initial_tempo / 120)
+        performance_params['timing'] = performance_params['timing'] / initial_tempo / 120
+        
         # Use partitura's decode_performance to create performed part
         performed_part = pt.musicanalysis.decode_performance(
             score_part, 
@@ -352,13 +380,15 @@ class YQXSystem:
         
 
         
-    def save_model(self, filepath: str):
+    def save_model(self, filepath: str = None):
         """Save trained model and feature encoders"""
+        filepath = filepath or self.config.model.model_path
         self.model.save(filepath)
         self.feature_extractor.save_encoders(filepath + ".encoders")
     
-    def load_model(self, filepath: str):
+    def load_model(self, filepath: str = None):
         """Load trained model and feature encoders"""
+        filepath = filepath or self.config.model.model_path
         self.model.load(filepath)
         self.feature_extractor.load_encoders(filepath + ".encoders")
 
@@ -366,55 +396,52 @@ class YQXSystem:
 def main():
     import argparse
     
-    # Set up argument parser
     parser = argparse.ArgumentParser(description='YQX Expressive Music Performance System')
-    parser.add_argument('--data_dir', type=str, 
-                      default="/Users/huanzhang/01Acdemics/PhD/Research/Datasets/vienna4x22",
-                      help='Path to Vienna4x22 dataset directory')
-    parser.add_argument('--asap_dir', type=str, 
-                      default="/Users/huanzhang/01Acdemics/PhD/Research/Datasets/asap-dataset-alignment",
-                      help='Path to ASAP dataset directory (optional)')
-    parser.add_argument('--input_score', type=str,
-                      default="/Users/huanzhang/01Acdemics/PhD/Research/Datasets/vienna4x22/musicxml/Chopin_op10_no3.musicxml",
-                      help='Path to input MusicXML score for rendering')
-    parser.add_argument('--output_midi', type=str,
-                      default="Chopin_op10_no3_yqx.mid",
-                      help='Path for output MIDI performance')
-    parser.add_argument('--model_path', type=str, default='yqx_model.pkl',
-                      help='Path to save/load model (default: yqx_model.pkl)')
-    parser.add_argument('--train', action='store_true',
-                      help='Train the model')
-    parser.add_argument('--render', action='store_true',
-                      help='Render a performance from input score')
-    parser.add_argument('--use_asap', action='store_true',
-                      help='Use ASAP dataset during training')
-    parser.add_argument('--use_midihum', action='store_true',
-                      help='Use additional midihum features')
+    parser.add_argument('--config', type=str, default='config/default.yml',
+                      help='Path to configuration file')
+    parser.add_argument('--override', type=str,
+                      help='Path to override configuration file')
+    parser.add_argument('overrides', nargs='*', 
+                      help='Any key=value overrides for config')
     
     args = parser.parse_args()
     
-    # Initialize system with ASAP only if use_asap is True
-    asap_dir = args.asap_dir if args.use_asap else None
-    yqx = YQXSystem(args.data_dir, asap_dir, use_midihum_features=args.use_midihum)
+    # Load base config
+    conf = OmegaConf.load(args.config)
     
-    # Train if requested
-    if args.train:
+    # Load and merge override config if provided
+    if args.override:
+        override_conf = OmegaConf.load(args.override)
+        conf = OmegaConf.merge(conf, override_conf)
+    
+    # Apply command line overrides
+    if args.overrides:
+        cli_conf = OmegaConf.from_cli(args.overrides)
+        conf = OmegaConf.merge(conf, cli_conf)
+    
+    # Initialize system
+    yqx = YQXSystem(conf)
+    
+    if conf.train.enabled:
         print("Training YQX system...")
         yqx.train()
-        yqx.save_model(args.model_path)
-        print(f"Model saved to {args.model_path}")
     
-    # Render if requested
-    if args.render:
-        if not os.path.exists(args.input_score):
-            print(f"Error: Input score {args.input_score} not found")
+    if conf.render.enabled:
+        if not os.path.exists(conf.render.input_score):
+            print(f"Error: Input score {conf.render.input_score} not found")
             return
-        
-        yqx.load_model(args.model_path)
             
-        print(f"Rendering performance of {args.input_score}")
-        yqx.render_performance(args.input_score, args.output_midi)
-        print(f"Performance saved to {args.output_midi}")
+        if not conf.train.enabled:
+            yqx.load_model()
+
+
+        print(f"Rendering performance of {conf.render.input_score}")
+        yqx.render_performance(
+            musicxml_path=conf.render.input_score,
+            output_midi=conf.render.output_midi,
+            initial_tempo=conf.render.initial_tempo
+        )
+
 
 if __name__ == "__main__":
     main()

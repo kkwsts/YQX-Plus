@@ -232,3 +232,6 @@ class ExpressiveNote:
     interval_from_pressed_tenkan_sen_relative_to_kijun_sen: Optional[float] = None
     interval_from_pressed_relative_to_chikou_span: Optional[float] = None
     interval_from_pressed_relative_to_cloud: Optional[float] = None
+
+    def get_targets(self):
+        return [self.beat_period, self.timing, self.velocity, self.articulation_log]
