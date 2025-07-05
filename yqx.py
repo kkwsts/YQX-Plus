@@ -99,14 +99,58 @@ class YQXSystem:
         
         # Initialize model based on config
         if config.model.type == "gmm":
-            self.model = BayesianExpressiveModel(n_components=config.model.n_components)
+            gmm_config = config.model.gmm
+            self.model = BayesianExpressiveModel(
+                n_components=gmm_config.n_components,
+                random_state=gmm_config.get('random_state', 42)
+            )
         elif config.model.type == "flow":
-            self.model = FMExpressiveModel()
+            flow_config = config.model.flow
+            self.model = FMExpressiveModel(
+                context_dim=flow_config.get('context_dim', 9),
+                expression_dim=flow_config.get('expression_dim', 4),
+                hidden_dim=flow_config.get('hidden_dim', 128),
+                use_midihum=config.model.use_midihum_features,
+                flow_matcher_type=flow_config.get('flow_matcher_type', 'standard'),
+                sigma=flow_config.get('sigma', 0.01)
+            )
         else:
             raise ValueError(f"Unknown model type: {config.model.type}")
         
+        # Generate model path for experiment tracking
+        self.model_path = self._generate_model_path(config)
+        
         # Create artifacts directory
         os.makedirs(config.output.artifacts_dir, exist_ok=True)
+        os.makedirs(config.output.ckpt_dir, exist_ok=True)
+        
+    def _generate_model_path(self, config: DictConfig) -> str:
+        """Generate a descriptive model path for experiment tracking"""
+        parts = []
+        
+        # Add experiment name if provided
+        if config.output.get('experiment_name'):
+            parts.append(config.output.experiment_name)
+        
+        # Add model type
+        parts.append(config.model.type)
+        
+        # Add model-specific parameters if requested
+        if config.output.get('include_model_params', True):
+            if config.model.type == "gmm":
+                parts.append(f"nc{config.model.gmm.n_components}")
+            elif config.model.type == "flow":
+                parts.append(f"hd{config.model.flow.get('hidden_dim', 128)}")
+                if config.model.flow.get('flow_matcher_type', 'standard') != 'standard':
+                    parts.append(f"fmt{config.model.flow.flow_matcher_type}")
+        
+        # Add midihum features flag
+        if config.model.use_midihum_features:
+            parts.append("midihum")
+        
+        # Combine parts
+        filename = "_".join(parts) + ".pkl"
+        return os.path.join(config.output.ckpt_dir, filename)
 
     def get_asap_aligned_note_arrays(self, split='train', split_csv_path=None):
         """Load ASAP aligned note arrays with encoded performance parameters
@@ -291,7 +335,7 @@ class YQXSystem:
         print(f"Training time: {time.time() - t0} seconds")
         
         # Save model and encoders
-        self.save_model(self.config.model.model_path)
+        self.save_model()
     
     def render_performance(self, musicxml_path: str = None, output_midi: str = None, initial_tempo: int = None):
         """Render expressive performance of a MusicXML score"""
@@ -378,19 +422,101 @@ class YQXSystem:
         # Save as MIDI
         pt.save_performance_midi(performance, output_path)
         
-
         
     def save_model(self, filepath: str = None):
-        """Save trained model and feature encoders"""
-        filepath = filepath or self.config.model.model_path
-        self.model.save(filepath)
-        self.feature_extractor.save_encoders(filepath + ".encoders")
+        """Save trained model with integrated scaler"""
+        filepath = filepath or self.model_path
+        print(f"Saving model to: {filepath}")
+        self.model.save(filepath, self.feature_extractor.feature_scaler)
     
     def load_model(self, filepath: str = None):
-        """Load trained model and feature encoders"""
-        filepath = filepath or self.config.model.model_path
+        """Load trained model with integrated scaler"""
+        filepath = filepath or self.model_path
+        print(f"Loading model from: {filepath}")
         self.model.load(filepath)
-        self.feature_extractor.load_encoders(filepath + ".encoders")
+        if self.model.feature_scaler is not None:
+            self.feature_extractor.feature_scaler = self.model.feature_scaler
+
+    def test_vienna4x22(self, output_subdir: str = None):
+        """Test the model on all 4 Vienna4x22 pieces and organize outputs"""
+        if not self.model.trained:
+            print("Model not trained! Please train or load a model first.")
+            return
+        
+        # Define test pieces with their designated tempos
+        test_pieces = [
+            ("Chopin_op10_no3", 30), 
+            ("Chopin_op38", 120), 
+            ("Mozart_K331_1st-mov", 120), 
+            ("Schubert_D783_no15", 130)
+        ]
+        
+        # Create organized output directory
+        if output_subdir is None:
+            # Generate subdir name from model info
+            model_info = []
+            model_info.append(self.config.model.type)
+            if self.config.model.type == "gmm":
+                model_info.append(f"nc{self.config.model.gmm.n_components}")
+            elif self.config.model.type == "flow":
+                model_info.append(f"hd{self.config.model.flow.get('hidden_dim', 128)}")
+            if self.config.model.use_midihum_features:
+                model_info.append("midihum")
+            output_subdir = "_".join(model_info)
+        
+        test_output_dir = os.path.join(self.config.output.output_dir, output_subdir)
+        os.makedirs(test_output_dir, exist_ok=True)
+        
+        print(f"Testing model on Vienna4x22 pieces...")
+        print(f"Output directory: {test_output_dir}")
+        
+        results_summary = {
+            "model_type": self.config.model.type,
+            "model_config": dict(self.config.model),
+            "model_path": self.model_path,
+            "use_midihum_features": self.config.model.use_midihum_features,
+            "pieces": {}
+        }
+        
+        for piece_name, tempo in test_pieces:
+            print(f"\nProcessing {piece_name} (tempo: {tempo} BPM)...")
+            
+            # Input and output paths
+            input_score = os.path.join(self.musicxml_dir, f"{piece_name}.musicxml")
+            output_midi = os.path.join(test_output_dir, f"{piece_name}_predicted.mid")
+            
+            # Render performance with piece-specific tempo
+            self.render_performance(
+                musicxml_path=input_score,
+                output_midi=output_midi,
+                initial_tempo=tempo
+            )
+            
+            # Move plots to organized location
+            pred_plot_src = os.path.join(self.config.output.artifacts_dir, "pred_params.png")
+            pred_plot_dst = os.path.join(test_output_dir, f"{piece_name}_predictions.png")
+            if os.path.exists(pred_plot_src):
+                import shutil
+                shutil.move(pred_plot_src, pred_plot_dst)
+            
+            results_summary["pieces"][piece_name] = {
+                "input_score": input_score,
+                "output_midi": output_midi,
+                "predictions_plot": pred_plot_dst,
+                "designated_tempo": tempo
+            }
+        
+        # Save experiment summary
+        import json
+        summary_file = os.path.join(test_output_dir, "experiment_summary.json")
+        with open(summary_file, 'w') as f:
+            json.dump(results_summary, f, indent=2, default=str)
+        
+        print(f"\n Test completed!")
+        print(f"Results saved to: {test_output_dir}")
+        print(f"Summary: {summary_file}")
+        
+        return test_output_dir
 
 # Example usage
 def main():
@@ -426,14 +552,21 @@ def main():
         print("Training YQX system...")
         yqx.train()
     
+    if conf.test.enabled:
+        print("Testing YQX system...")
+        if not conf.train.enabled:
+            yqx.load_model()
+        
+        print("Running Vienna4x22 test suite...")
+        test_output_dir = yqx.test_vienna4x22()
+    
     if conf.render.enabled:
         if not os.path.exists(conf.render.input_score):
             print(f"Error: Input score {conf.render.input_score} not found")
             return
             
-        if not conf.train.enabled:
+        if not conf.train.enabled and not conf.test.enabled:
             yqx.load_model()
-
 
         print(f"Rendering performance of {conf.render.input_score}")
         yqx.render_performance(

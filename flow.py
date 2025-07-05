@@ -86,6 +86,7 @@ class FMExpressiveModel:
         # # Scalers for normalization
         self.context_scaler = StandardScaler()
         self.expression_scaler = StandardScaler()
+        self.feature_scaler = None  # Store scaler in model
         
         # Optimizer
         self.optimizer = torch.optim.AdamW(self.net.parameters(), lr=1e-3, weight_decay=1e-4)
@@ -270,8 +271,10 @@ class FMExpressiveModel:
         
         return predicted_notes
     
-    def save(self, filepath: str):
-        """Save trained model"""
+    def save(self, filepath: str, feature_scaler=None):
+        """Save trained model with optional feature scaler"""
+        if feature_scaler is not None:
+            self.feature_scaler = feature_scaler
         model_data = {
             'net_state_dict': self.net.state_dict(),
             'context_scaler': self.context_scaler,
@@ -280,7 +283,8 @@ class FMExpressiveModel:
             'expression_dim': self.expression_dim,
             'hidden_dim': self.hidden_dim,
             'use_midihum': self.use_midihum,
-            'trained': self.trained
+            'trained': self.trained,
+            'feature_scaler': self.feature_scaler
         }
         torch.save(model_data, filepath)
     
@@ -313,6 +317,7 @@ class FMExpressiveModel:
         self.context_scaler = model_data['context_scaler']
         self.expression_scaler = model_data['expression_scaler']
         self.trained = model_data['trained']
+        self.feature_scaler = model_data.get('feature_scaler', None)
 
     def test_with_features(self, feature_extractor):
         """Test the model with features.py to verify compatibility"""

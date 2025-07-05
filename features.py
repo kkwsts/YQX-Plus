@@ -16,7 +16,43 @@ class FeatureExtractor:
         self.ir_categories = [
             'Process', 'Reversal', 'Registral_Return', 'Intervallic_Duplication'
         ]
-        self.feature_encoders = {}
+        
+        # Fixed mappings - no need to save/load these
+        self.feature_encoders = {
+            'rhythmic_context': {
+                'boundary': 0,
+                's-s': 1, 's-m': 2, 's-l': 3,
+                'm-s': 4, 'm-m': 5, 'm-l': 6,
+                'l-s': 7, 'l-m': 8, 'l-l': 9
+            },
+            'ir_label': {
+                'boundary': 0,
+                'Process': 1,
+                'Reversal': 2,
+                'Registral_Return': 3,
+                'Intervallic_Duplication': 4
+            }
+        }
+        
+        # Add midihum categorical mappings if needed
+        if True:  # Always define these for consistency
+            self.feature_encoders.update({
+                'chord_character_pressed': {
+                    'none': 0, 'major': 1, 'minor': 2, 'diminished': 3, 'augmented': 4,
+                    'dominant': 5, 'major7': 6, 'minor7': 7, 'other': 8
+                },
+                'chord_size_pressed': {
+                    0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8
+                },
+                'chord_character': {
+                    'none': 0, 'major': 1, 'minor': 2, 'diminished': 3, 'augmented': 4,
+                    'dominant': 5, 'major7': 6, 'minor7': 7, 'other': 8
+                },
+                'chord_size': {
+                    0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8
+                }
+            })
+        
         self.feature_scaler = None
     
     def encode_features(self, notes: List[ExpressiveNote], fit: bool = False, use_midihum: bool = False) -> np.ndarray:
@@ -162,17 +198,7 @@ class FeatureExtractor:
             # Replace None values with 0.0
             continuous_features.append([x if x is not None else 0.0 for x in cont_features])
         
-        # Encode categorical features
-        if fit:
-            # Create encoders for each categorical feature
-            feature_names = BASE_CATEGORICAL_FEATURES
-            if use_midihum:
-                feature_names.extend(MIDIHUM_CATEGORICAL_FEATURES)
-                
-            for i, feature_name in enumerate(feature_names):
-                unique_values = list(set(f[i] for f in categorical_features))
-                self.feature_encoders[feature_name] = {v: j for j, v in enumerate(unique_values)}
-        
+
         # Apply encodings
         encoded_categorical = []
         for features in categorical_features:
@@ -191,22 +217,6 @@ class FeatureExtractor:
             all_features = self.feature_scaler.transform(all_features)
         
         return all_features
-    
-    def save_encoders(self, filepath: str):
-        """Save feature encoders and scaler"""
-        data = {
-            'encoders': self.feature_encoders,
-            'scaler': self.feature_scaler
-        }
-        with open(filepath, 'wb') as f:
-            pickle.dump(data, f)
-    
-    def load_encoders(self, filepath: str):
-        """Load feature encoders and scaler"""
-        with open(filepath, 'rb') as f:
-            data = pickle.load(f)
-        self.feature_encoders = data['encoders']
-        self.feature_scaler = data['scaler']
     
     def extract_voices(self, note_array: np.ndarray) -> List[np.ndarray]:
         """Extract all voices sorted from highest to lowest pitch"""
@@ -749,6 +759,7 @@ class FeatureExtractor:
             avg_tempo = 60 / np.mean(perf_params['beat_period'])
             # Scale factor to convert to 120 BPM
             scale = avg_tempo / 120
+            print(f"avg_tempo: {avg_tempo}")
             
             # Scale beat period and timing
             perf_params['beat_period'] = perf_params['beat_period'] * scale

@@ -7,9 +7,10 @@ The system predicts expressive performance parameters from musical score context
 ## Overview
 
 - Extracts musical context features from MusicXML scores
-- Trains a probabilitis expressive model on aligned score-performance data
+- Trains a probabilistic expressive model on aligned score-performance data
 - Predicts expressive parameters for new scores
 - Renders expressive MIDI performances
+- Automated testing framework with organized experiment tracking
 
 ## Requirements
 
@@ -29,33 +30,113 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Training the Model
+### Training Models
 
 ```bash
-python yqx.py train.enabled=True data.use_asap=True data.asap_dir=<path_to_asap>
+# Train GMM with different components
+python yqx.py train.enabled=true model.type=gmm model.gmm.n_components=48
+
+# Train with MIDIHUM features
+python yqx.py train.enabled=true model.use_midihum_features=true
+
+# Train with ASAP dataset
+python yqx.py train.enabled=true data.use_asap=true
 ```
 
-- `train.enabled`: Train the model
-- `data.use_asap`: (Optional) Use ASAP dataset for training
-- `data.asap_dir`: (Optional) Path to ASAP dataset directory
-- `data.use_midihum`: (Optional) Use MIDIHUM features
-
-### Rendering an Expressive Performance
 
 ```bash
-python yqx.py render.enabled=True render.input_score=<path_to_musicxml> render.output_midi=<output_midi_path> render.model_path=<model_file> render.initial_tempo=<initial_tempo>
+# Train and test automatically
+python yqx.py train.enabled=true test.enabled=true model.gmm.n_components=32
+
+# Test existing model
+python yqx.py test.enabled=true model.gmm.n_components=48
 ```
 
-- `render.enabled`: Render the performance
-- `render.input_score`: Path to input MusicXML score
-- `render.output_midi`: Path for output MIDI file
-- `render.model_path`: Path to trained model file (default: yqx_model.pkl)
-- `render.initial_tempo`: Initial tempo in bpm for rendering (default: 120, we have standardized the time parameters to 120 in training) 
+### Rendering Single Performance
 
-### Features 
+```bash
+python yqx.py render.enabled=true render.input_score=<path_to_musicxml> render.output_midi=<output_midi_path> render.initial_tempo=<initial_tempo>
+```
+
+### Custom Experiments
+
+```bash
+# Custom experiment with name
+python yqx.py train.enabled=true test.enabled=true model.gmm.n_components=64 model.use_midihum_features=true output.experiment_name=large_gmm_midihum
+```
+
+## Configuration
+
+### Model Configuration
+
+**GMM Model:**
+- `model.type`: "gmm"
+- `model.gmm.n_components`: Number of Gaussian components (default: 48)
+- `model.gmm.random_state`: Random seed (default: 42)
+
+
+**General Model Options:**
+- `model.use_midihum_features`: Include MIDIHUM features (default: false)
+
+### Training Configuration
+
+- `train.enabled`: Enable training (default: false)
+- `train.batch_size`: Training batch size (default: 32)
+- `train.num_epochs`: Number of training epochs (default: 100)
+- `train.learning_rate`: Learning rate (default: 0.001)
+
+### Testing Configuration
+
+- `test.enabled`: Enable Vienna4x22 testing (default: false)
+
+### Output Configuration
+
+- `output.experiment_name`: Custom experiment name (default: auto-generated)
+- `output.include_model_params`: Include model params in filename (default: true)
+- `output.artifacts_dir`: Artifacts directory (default: "artifacts")
+- `output.ckpt_dir`: Model checkpoints directory (default: "ckpts")
+- `output.output_dir`: Output directory (default: "outputs")
+
+## File Organization
+
+### Model Files
+Models are automatically named with descriptive parameters:
+- `gmm_nc48.pkl` - GMM with 48 components
+- `gmm_nc32_midihum.pkl` - GMM with 32 components + MIDIHUM features
+- `flow_hd256.pkl` - Flow model with 256 hidden dimensions
+- `custom_name_gmm_nc64.pkl` - Custom experiment name
+
+### Test Results
+Testing creates organized output directories:
+```
+outputs/
+├── gmm_nc32/
+│   ├── Chopin_op10_no3_predicted.mid
+│   ├── Chopin_op38_predicted.mid
+│   ├── Mozart_K331_1st-mov_predicted.mid
+│   ├── Schubert_D783_no15_predicted.mid
+│   ├── *_predictions.png
+│   └── experiment_summary.json
+├── gmm_nc48_midihum/
+└── flow_hd128/
+```
+
+## Vienna4x22 Testing
+
+The system automatically tests on 4 Vienna4x22 pieces with designated tempos:
+- Chopin_op10_no3: 30 BPM
+- Chopin_op38: 120 BPM  
+- Mozart_K331_1st-mov: 120 BPM
+- Schubert_D783_no15: 130 BPM
+
+Each test generates:
+- Predicted MIDI files for each piece
+- Prediction visualization plots
+- Complete experiment metadata in JSON format
+
+## Features 
 
 Features from original YQX system:
-
 - IR Category
 - IR label
 - Rhythmic context
@@ -63,16 +144,9 @@ Features from original YQX system:
 - ir_closure
 - position_in_phrase
 
-
-
-
 #### MIDIHUM Features
 
 We took the features from the [MIDIHUM](https://github.com/erwald/midihum) library and added them to the ExpressiveNote class.
-
-
-
-
 
 ## File Structure
 
@@ -82,6 +156,7 @@ We took the features from the [MIDIHUM](https://github.com/erwald/midihum) libra
 - `gmm.py`: Bayesian expressive model (GMM-based)
 - `flow.py`: Flow-based expressive model (need update)
 - more modelling class to be added
+- `config/default.yml`: Default configuration file
 
 ## Datasets
 

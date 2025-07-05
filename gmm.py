@@ -14,10 +14,12 @@ from expressivenote import ExpressiveNote
 class BayesianExpressiveModel:
     """Bayesian model for predicting expressive parameters"""
     
-    def __init__(self, n_components: int = 8):
+    def __init__(self, n_components: int = 8, random_state: int = 42):
         self.n_components = n_components
+        self.random_state = random_state
         self.models = {}  # One model per target variable
         self.trained = False
+        self.feature_scaler = None  # Store scaler in model
     
     def train(self, training_notes: List[List[ExpressiveNote]], feature_extractor):
         """Train the Bayesian model on training data"""
@@ -53,7 +55,7 @@ class BayesianExpressiveModel:
             print(f"Training {target_name} model...")
             
             # Train Gaussian Mixture Model
-            model = GaussianMixture(n_components=self.n_components, random_state=42)
+            model = GaussianMixture(n_components=self.n_components, random_state=self.random_state)
             
             # Combine features and targets for joint modeling
             joint_data = np.column_stack([X, y])
@@ -138,24 +140,30 @@ class BayesianExpressiveModel:
         
         return predicted_parameters
     
-    def save(self, filepath: str):
-        """Save trained model"""
+    def save(self, filepath: str, feature_scaler=None):
+        """Save trained model with optional feature scaler"""
+        if feature_scaler is not None:
+            self.feature_scaler = feature_scaler
         model_data = {
             'models': self.models,
             'n_components': self.n_components,
-            'trained': self.trained
+            'random_state': self.random_state,
+            'trained': self.trained,
+            'feature_scaler': self.feature_scaler
         }
         with open(filepath, 'wb') as f:
             pickle.dump(model_data, f)
     
     def load(self, filepath: str):
-        """Load trained model"""
+        """Load trained model and return feature scaler if available"""
         with open(filepath, 'rb') as f:
             model_data = pickle.load(f)
         
         self.models = model_data['models']
         self.n_components = model_data['n_components']
+        self.random_state = model_data['random_state']
         self.trained = model_data['trained']
+        self.feature_scaler = model_data.get('feature_scaler', None)
 
 
 

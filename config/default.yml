@@ -11,10 +11,20 @@ data:
 
 # Model configuration
 model:
-  type: "gmm"  # or "flow"
-  n_components: 48
+  type: "gmm"  # Options: "gmm", "flow"
   use_midihum_features: false
-  model_path: "${output.ckpt_dir}/yqx_model.pkl"
+  
+  # Model-specific parameters
+  gmm:
+    n_components: 48
+    random_state: 42
+    
+  flow:
+    context_dim: 9
+    expression_dim: 4
+    hidden_dim: 128
+    flow_matcher_type: "standard"
+    sigma: 0.01
 
 # Training configuration
 train:
@@ -23,6 +33,10 @@ train:
   num_epochs: 100
   learning_rate: 0.001
   validation_split: 0.2
+
+# Testing configuration
+test:
+  enabled: false
 
 # Rendering configuration
 render:
@@ -38,4 +52,8 @@ output:
   output_dir: "outputs"
   save_plots: true
   plot_targets: true
-  save_distributions: true 
+  save_distributions: true
+  
+  # Experiment tracking
+  experiment_name: null  # If null, auto-generate from model config
+  include_model_params: true 
