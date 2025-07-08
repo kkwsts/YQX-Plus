@@ -18,11 +18,12 @@ import matplotlib.pyplot as plt
 import hook
 import warnings
 from omegaconf import OmegaConf, DictConfig
+import torch
 warnings.filterwarnings('ignore')
 
 from expressivenote import ExpressiveNote  
 from gmm import BayesianExpressiveModel
-from flow import FMExpressiveModel
+from flow_JASCO import FMExpressiveModel
 from features import FeatureExtractor
 
 
@@ -106,13 +107,22 @@ class YQXSystem:
             )
         elif config.model.type == "flow":
             flow_config = config.model.flow
+            device = config.model.get('device', 'cpu')
+            if device.startswith('cuda:'):
+                # Check if specified GPU is available
+                gpu_id = int(device.split(':')[1])
+                if gpu_id >= torch.cuda.device_count():
+                    print(f"Warning: GPU {gpu_id} not available, using CPU instead")
+                    device = "cpu"
+            
             self.model = FMExpressiveModel(
-                context_dim=flow_config.get('context_dim', 9),
+                features_dim=flow_config.get('context_dim', 9),
                 expression_dim=flow_config.get('expression_dim', 4),  # Keep as expression_dim for backward compatibility
                 hidden_dim=flow_config.get('hidden_dim', 128),
                 use_midihum=config.model.use_midihum_features,
                 flow_matcher_type=flow_config.get('flow_matcher_type', 'standard'),
-                sigma=flow_config.get('sigma', 0.01)
+                sigma=flow_config.get('sigma', 0.01),
+                device=device
             )
         elif config.model.type == "bvae":
             bvae_config = config.model.bvae
@@ -318,6 +328,7 @@ class YQXSystem:
         print("Loading training data...")
         note_pairs = self.get_v422_aligned_note_arrays('train')
         if self.asap_dir is not None:
+            print("Loading ASAP training data...")
             note_pairs.extend(self.get_asap_aligned_note_arrays('train', self.asap_split_csv))
         print(f"Loaded {len(note_pairs)} score-performance pairs")
         
@@ -390,6 +401,7 @@ class YQXSystem:
         
         self.model.train(context_features, targets, **train_kwargs)
         
+        self.model.train_model(training_notes, self.feature_extractor)
         print(f"Training time: {time.time() - t0} seconds")
         
         # Save model and encoders

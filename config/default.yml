@@ -5,13 +5,14 @@ defaults:
 
 # Data paths
 data:
-  vienna4x22_dir: "/Users/huanzhang/01Acdemics/PhD/Research/Datasets/vienna4x22"
-  asap_dir: "/Users/huanzhang/01Acdemics/PhD/Research/Datasets/asap-dataset-alignment"
+  vienna4x22_dir: "/Users/kkwsts/Datasets/vienna4x22"
+  asap_dir: "/Users/kkwsts/Datasets/asap-dataset-alignment"
   use_asap: false
 
 # Model configuration
 model:
   type: "gmm"  # Options: "gmm", "flow", "bvae"
+  type: "flow"  # Options: "gmm", "flow"
   use_midihum_features: false
   
   # Model-specific parameters
@@ -37,11 +38,15 @@ model:
     epochs: 1000
     batch_size: 32
 
+  # Model path
+  model_path: "${output.ckpt_dir}/yqx_${model.type}_model.pkl"
+  device: "cpu"  # Options: "cpu", "cuda:0", etc.
+
 # Training configuration
 train:
   enabled: false
   batch_size: 32
-  num_epochs: 100
+  num_epochs: 1000
   learning_rate: 0.001
   validation_split: 0.2
 
@@ -53,7 +58,7 @@ test:
 render:
   enabled: false
   input_score: "${data.vienna4x22_dir}/musicxml/Chopin_op10_no3.musicxml"
-  output_midi: "${output.output_dir}/Chopin_op10_no3_yqx.mid"
+  output_midi: "${output.output_dir}/Chopin_op10_no3_yqx_flow.mid"
   initial_tempo: 120
 
 # Output configuration
