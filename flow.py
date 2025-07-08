@@ -140,38 +140,19 @@ class FMExpressiveModel:
         
         return F.mse_loss(pred_velocity, ut)
     
-    def train(self, training_notes: List[List[ExpressiveNote]], feature_extractor, epochs: int = 1000, batch_size: int = 32):
-        """Train the flow matching model using features.py"""
-        print("Training Flow Matching model with features.py...")
+    def train(self, context_features: np.ndarray, targets: np.ndarray, 
+              epochs: int = 1000, batch_size: int = 32, **kwargs):
+        """Train the flow model on pre-extracted features and targets"""
+        print("Training Flow model...")
+        print(f"Training on {len(context_features)} samples")
         
-        # Flatten all notes
-        all_notes = []
-        for piece_notes in training_notes:
-            all_notes.extend(piece_notes)
-        
-        # Filter out notes without targets
-        training_notes_filtered = [note for note in all_notes if 
-                                 note.beat_period is not None and 
-                                 note.timing is not None and 
-                                 note.velocity is not None and
-                                 note.articulation_log is not None]
-        
-        print(f"Training on {len(training_notes_filtered)} notes")
-        
-        context_features = feature_extractor.encode_features(training_notes_filtered, fit=True, use_midihum=self.use_midihum)
+        # Scale features and targets
         context_features = self.context_scaler.fit_transform(context_features)
         context_features = torch.tensor(context_features, dtype=torch.float32, device=self.device)
         
         print(f"Context features shape: {context_features.shape}")  # (num_samples, context_dim)
         assert context_features.shape[1] == self.context_dim, f"Expected context_dim={self.context_dim}, but got {context_features.shape[1]}"
 
-        targets = np.array([[
-            note.beat_period,
-            note.timing, 
-            note.velocity / 127.0,  # Normalize velocity to [0,1]
-            note.articulation_log
-        ] for note in training_notes_filtered])
-        
         targets = self.expression_scaler.fit_transform(targets)
         targets = torch.tensor(targets, dtype=torch.float32, device=self.device)
         
@@ -209,7 +190,7 @@ class FMExpressiveModel:
                 print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
         
         self.trained = True
-        print("Training completed!")
+        print("Flow training completed!")
     
     def sample(self, context: torch.Tensor, n_steps: int = 50) -> torch.Tensor:
         """
@@ -235,12 +216,11 @@ class FMExpressiveModel:
             
             return x
     
-    def predict(self, notes: List[ExpressiveNote], feature_extractor) -> List[ExpressiveNote]:
-        """Predict expressive parameters for new notes using features.py"""
+    def predict(self, context_features: np.ndarray) -> np.ndarray:
+        """Predict targets for pre-extracted features"""
         if not self.trained:
             raise ValueError("Model must be trained before prediction")
         
-        context_features = feature_extractor.encode_features(notes, fit=False, use_midihum=self.use_midihum)
         context_features = self.context_scaler.transform(context_features)
         context_features = torch.tensor(context_features, dtype=torch.float32, device=self.device)
         
@@ -249,27 +229,7 @@ class FMExpressiveModel:
         predictions = predictions.cpu().numpy()
         predictions = self.expression_scaler.inverse_transform(predictions)
         
-        predicted_notes = []
-        for i, note in enumerate(notes):
-            new_note = ExpressiveNote(
-                pitch=note.pitch,
-                onset_beat=note.onset_beat,
-                duration_beat=note.duration_beat,
-                voice=note.voice,
-                pitch_interval=note.pitch_interval,
-                duration_ratio=note.duration_ratio,
-                rhythmic_context=note.rhythmic_context,
-                ir_label=note.ir_label,
-                ir_closure=note.ir_closure,
-                position_in_phrase=note.position_in_phrase,
-                beat_period=float(np.clip(predictions[i, 0], 0.3, 3.0)),
-                timing=float(np.clip(predictions[i, 1], -0.5, 0.5)),
-                velocity=int(np.clip(predictions[i, 2] * 127, 1, 127)),
-                articulation_log=float(np.clip(predictions[i, 3], -2.0, 1.0))
-            )
-            predicted_notes.append(new_note)
-        
-        return predicted_notes
+        return predictions
     
     def save(self, filepath: str, feature_scaler=None):
         """Save trained model with optional feature scaler"""

@@ -11,7 +11,7 @@ data:
 
 # Model configuration
 model:
-  type: "gmm"  # Options: "gmm", "flow"
+  type: "gmm"  # Options: "gmm", "flow", "bvae"
   use_midihum_features: false
   
   # Model-specific parameters
@@ -25,6 +25,17 @@ model:
     hidden_dim: 128
     flow_matcher_type: "standard"
     sigma: 0.01
+    
+  bvae:
+    context_dim: 9
+    target_dim: 4
+    latent_dim: 64
+    hidden_dims: [256, 128]
+    beta: 4.0
+    gamma: 1000.0
+    learning_rate: 0.001
+    epochs: 1000
+    batch_size: 32
 
 # Training configuration
 train:

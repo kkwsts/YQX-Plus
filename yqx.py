@@ -108,11 +108,24 @@ class YQXSystem:
             flow_config = config.model.flow
             self.model = FMExpressiveModel(
                 context_dim=flow_config.get('context_dim', 9),
-                expression_dim=flow_config.get('expression_dim', 4),
+                expression_dim=flow_config.get('expression_dim', 4),  # Keep as expression_dim for backward compatibility
                 hidden_dim=flow_config.get('hidden_dim', 128),
                 use_midihum=config.model.use_midihum_features,
                 flow_matcher_type=flow_config.get('flow_matcher_type', 'standard'),
                 sigma=flow_config.get('sigma', 0.01)
+            )
+        elif config.model.type == "bvae":
+            bvae_config = config.model.bvae
+            from bvae import BVAEExpressiveModel
+            self.model = BVAEExpressiveModel(
+                context_dim=bvae_config.get('context_dim', 9),
+                target_dim=bvae_config.get('target_dim', 4),
+                latent_dim=bvae_config.get('latent_dim', 64),
+                hidden_dims=bvae_config.get('hidden_dims', [256, 128]),
+                beta=bvae_config.get('beta', 4.0),
+                gamma=bvae_config.get('gamma', 1000.0),
+                use_midihum=config.model.use_midihum_features,
+                learning_rate=bvae_config.get('learning_rate', 0.001)
             )
         else:
             raise ValueError(f"Unknown model type: {config.model.type}")
@@ -143,6 +156,11 @@ class YQXSystem:
                 parts.append(f"hd{config.model.flow.get('hidden_dim', 128)}")
                 if config.model.flow.get('flow_matcher_type', 'standard') != 'standard':
                     parts.append(f"fmt{config.model.flow.flow_matcher_type}")
+            elif config.model.type == "bvae":
+                parts.append(f"ld{config.model.bvae.get('latent_dim', 64)}")
+                parts.append(f"b{config.model.bvae.get('beta', 4.0)}")
+                if config.model.bvae.get('gamma', 1000.0) != 1000.0:
+                    parts.append(f"g{config.model.bvae.gamma}")
         
         # Add midihum features flag
         if config.model.use_midihum_features:
@@ -331,7 +349,47 @@ class YQXSystem:
         
         # Train model
         t0 = time.time()
-        self.model.train(training_notes, self.feature_extractor)
+        
+        # Flatten all notes and extract features/targets (same for all models)
+        all_notes = []
+        for piece_notes in training_notes:
+            all_notes.extend(piece_notes)
+        
+        # Filter notes with targets
+        training_notes_filtered = [note for note in all_notes if 
+                                 note.beat_period is not None and
+                                 note.timing is not None and
+                                 note.velocity is not None and
+                                 note.articulation_log is not None]
+        
+        # Extract features
+        context_features = self.feature_extractor.encode_features(
+            training_notes_filtered, 
+            fit=True, 
+            use_midihum=self.config.model.use_midihum_features
+        )
+        
+        # Prepare targets
+        targets = np.array([[
+            note.beat_period,
+            note.timing,
+            note.velocity / 127.0,  # Normalize velocity
+            note.articulation_log
+        ] for note in training_notes_filtered])
+        
+        # Train model (model-agnostic interface)
+        train_kwargs = {}
+        if self.config.model.type == "bvae":
+            bvae_config = self.config.model.bvae
+            train_kwargs['epochs'] = bvae_config.get('epochs', 1000)
+            train_kwargs['batch_size'] = bvae_config.get('batch_size', 32)
+        elif self.config.model.type == "flow":
+            flow_config = self.config.model.flow
+            train_kwargs['epochs'] = self.config.train.get('num_epochs', 100)
+            train_kwargs['batch_size'] = self.config.train.get('batch_size', 32)
+        
+        self.model.train(context_features, targets, **train_kwargs)
+        
         print(f"Training time: {time.time() - t0} seconds")
         
         # Save model and encoders
@@ -353,9 +411,35 @@ class YQXSystem:
             use_midihum_features=self.config.model.use_midihum_features
         )
         
-        # Predict expressive parameters
+        # Predict expressive parameters (model-agnostic)
         print("Predicting expressive parameters...")
-        predicted_expressive_notes = self.model.predict(expressive_notes, self.feature_extractor)
+        context_features = self.feature_extractor.encode_features(
+            expressive_notes, 
+            fit=False, 
+            use_midihum=self.config.model.use_midihum_features
+        )
+        predictions = self.model.predict(context_features)
+        
+        # Convert predictions back to ExpressiveNote objects
+        predicted_expressive_notes = []
+        for i, note in enumerate(expressive_notes):
+            new_note = ExpressiveNote(
+                pitch=note.pitch,
+                onset_beat=note.onset_beat,
+                duration_beat=note.duration_beat,
+                voice=note.voice,
+                pitch_interval=note.pitch_interval,
+                duration_ratio=note.duration_ratio,
+                rhythmic_context=note.rhythmic_context,
+                ir_label=note.ir_label,
+                ir_closure=note.ir_closure,
+                position_in_phrase=note.position_in_phrase,
+                beat_period=float(np.clip(predictions[i, 0], 0.3, 3.0)),
+                timing=float(np.clip(predictions[i, 1], -0.5, 0.5)),
+                velocity=int(np.clip(predictions[i, 2] * 127, 1, 127)),
+                articulation_log=float(np.clip(predictions[i, 3], -2.0, 1.0))
+            )
+            predicted_expressive_notes.append(new_note)
         
         plot_path = os.path.join(self.config.output.artifacts_dir, "pred_params.png")
         self.feature_extractor.plot_targets(predicted_expressive_notes, plot_path)
@@ -460,6 +544,9 @@ class YQXSystem:
                 model_info.append(f"nc{self.config.model.gmm.n_components}")
             elif self.config.model.type == "flow":
                 model_info.append(f"hd{self.config.model.flow.get('hidden_dim', 128)}")
+            elif self.config.model.type == "bvae":
+                model_info.append(f"ld{self.config.model.bvae.get('latent_dim', 64)}")
+                model_info.append(f"b{self.config.model.bvae.get('beta', 4.0)}")
             if self.config.model.use_midihum_features:
                 model_info.append("midihum")
             output_subdir = "_".join(model_info)

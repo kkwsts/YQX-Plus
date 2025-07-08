@@ -21,82 +21,52 @@ class BayesianExpressiveModel:
         self.trained = False
         self.feature_scaler = None  # Store scaler in model
     
-    def train(self, training_notes: List[List[ExpressiveNote]], feature_extractor):
-        """Train the Bayesian model on training data"""
-        print("Training YQX model...")
+    def train(self, context_features: np.ndarray, targets: np.ndarray, **kwargs):
+        """Train the Bayesian model on pre-extracted features and targets"""
+        print("Training GMM model...")
+        print(f"Training on {len(context_features)} samples")
         
-        # Flatten all notes
-        all_notes = []
-        for piece_notes in training_notes:
-            all_notes.extend(piece_notes)
-        
-        # Filter out notes without targets
-        training_notes_filtered = [note for note in all_notes if 
-                                 note.beat_period is not None and
-                                 note.timing is not None and
-                                 note.velocity is not None and
-                                 note.articulation_log is not None]
-        
-        print(f"Training on {len(training_notes_filtered)} notes")
-        
-        # Extract and encode features
-        X = feature_extractor.encode_features(training_notes_filtered, fit=True)
-
-        # Extract targets
-        targets = {
-            'beat_period': np.array([note.beat_period for note in training_notes_filtered]),
-            'timing': np.array([note.timing for note in training_notes_filtered]),
-            'velocity': np.array([note.velocity for note in training_notes_filtered]),
-            'articulation_log': np.array([note.articulation_log for note in training_notes_filtered])
+        # Split targets into separate arrays
+        target_dict = {
+            'beat_period': targets[:, 0],
+            'timing': targets[:, 1], 
+            'velocity': targets[:, 2],
+            'articulation_log': targets[:, 3]
         }
         
         # Train separate models for each target
-        for target_name, y in targets.items():
+        for target_name, y in target_dict.items():
             print(f"Training {target_name} model...")
             
             # Train Gaussian Mixture Model
             model = GaussianMixture(n_components=self.n_components, random_state=self.random_state)
             
             # Combine features and targets for joint modeling
-            joint_data = np.column_stack([X, y])
+            joint_data = np.column_stack([context_features, y])
             model.fit(joint_data)
             
             self.models[target_name] = model
         
         self.trained = True
-        print("Training completed!")
+        print("GMM training completed!")
     
-    def predict(self, notes: List[ExpressiveNote], feature_extractor) -> List[ExpressiveNote]:
-        """Predict expressive parameters for new notes"""
+    def predict(self, context_features: np.ndarray) -> np.ndarray:
+        """Predict targets for pre-extracted features"""
         if not self.trained:
             raise ValueError("Model must be trained before prediction")
         
-        # Extract and encode features
-        X = feature_extractor.encode_features(notes, fit=False)
+        # Initialize predictions array
+        predictions = np.zeros((len(context_features), 4))
         
-        # Predict each target
-        predicted_parameters = []
-        for i, note in enumerate(notes):
-            new_note = ExpressiveNote(
-                pitch=note.pitch,
-                onset_beat=note.onset_beat,
-                duration_beat=note.duration_beat,
-                voice=note.voice,
-                pitch_interval=note.pitch_interval,
-                duration_ratio=note.duration_ratio,
-                rhythmic_context=note.rhythmic_context,
-                ir_label=note.ir_label,
-                ir_closure=note.ir_closure,
-                position_in_phrase=note.position_in_phrase
-            )
+        # Predict each target variable
+        target_names = ['beat_period', 'timing', 'velocity', 'articulation_log']
+        for target_idx, target_name in enumerate(target_names):
+            model = self.models[target_name]
             
-            # Predict each target variable
-            for target_name in ['beat_period', 'timing', 'velocity', 'articulation_log']:
-                model = self.models[target_name]
-                
+            for i in range(len(context_features)):
                 # Use conditional expectation given features
                 # Approximate by finding most likely component and using its mean
-                features = X[i:i+1]
+                features = context_features[i:i+1]
                 
                 # Find most likely component
                 log_probs = []
@@ -120,25 +90,9 @@ class BayesianExpressiveModel:
                 
                 # Predict target using conditional mean
                 target_mean = model.means_[best_comp, -1]  # Last dimension is target
-                target_pred = target_mean
-                
-                # Apply reasonable ranges and assign to note
-                if target_name == 'beat_period':
-                    # target_pred = np.clip(target_pred, 0.3, 3.0)
-                    new_note.beat_period = target_pred
-                elif target_name == 'timing':
-                    # target_pred = np.clip(target_pred, -0.5, 0.5)
-                    new_note.timing = target_pred
-                elif target_name == 'velocity':
-                    # target_pred = int(np.clip(target_pred, 0, 1))
-                    new_note.velocity = target_pred
-                elif target_name == 'articulation_log':
-                    # target_pred = np.clip(target_pred, -2.0, 1.0)
-                    new_note.articulation_log = target_pred
-            
-            predicted_parameters.append(new_note)
+                predictions[i, target_idx] = target_mean
         
-        return predicted_parameters
+        return predictions
     
     def save(self, filepath: str, feature_scaler=None):
         """Save trained model with optional feature scaler"""

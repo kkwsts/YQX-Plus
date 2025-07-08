@@ -1,0 +1,416 @@
+import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from typing import List, Tuple, Dict, Optional
+from sklearn.preprocessing import StandardScaler
+
+from expressivenote import ExpressiveNote
+
+
+class BetaVAE(nn.Module):
+    """
+    β-VAE for Expressive Performance Modeling
+    
+    Conditional β-VAE that maps musical context features to expressive performance parameters
+    with controllable disentanglement via β parameter.
+    
+    Based on: "β-VAE: Learning Basic Visual Concepts with a Constrained Variational Framework"
+    Adapted for musical performance from PyTorch-VAE repository structure.
+    """
+    
+    def __init__(self, 
+                 context_dim: int = 9,
+                 target_dim: int = 4, 
+                 latent_dim: int = 64,
+                 hidden_dims: List[int] = [256, 128],
+                 beta: float = 1.0,
+                 gamma: float = 1000.0,
+                 max_capacity: int = 25,
+                 capacity_max_iter: int = 1e5,
+                 use_midihum: bool = False):
+        super(BetaVAE, self).__init__()
+        
+        self.context_dim = context_dim
+        self.target_dim = target_dim
+        self.latent_dim = latent_dim
+        self.beta = beta
+        self.gamma = gamma
+        self.max_capacity = max_capacity
+        self.capacity_max_iter = capacity_max_iter
+        self.use_midihum = use_midihum
+        self.num_iter = 0
+        
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Build encoder: context -> latent (no target input to avoid leakage)
+        encoder_layers = []
+        
+        prev_dim = context_dim
+        for h_dim in hidden_dims:
+            encoder_layers.extend([
+                nn.Linear(prev_dim, h_dim),
+                nn.BatchNorm1d(h_dim),
+                nn.LeakyReLU(0.2),
+                nn.Dropout(0.1)
+            ])
+            prev_dim = h_dim
+        
+        self.encoder = nn.Sequential(*encoder_layers)
+        
+        # Latent space
+        self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
+        self.fc_var = nn.Linear(hidden_dims[-1], latent_dim)
+        
+        # Build decoder: latent + context -> target
+        decoder_input_dim = latent_dim + context_dim
+        decoder_layers = []
+        
+        prev_dim = decoder_input_dim
+        for h_dim in reversed(hidden_dims):
+            decoder_layers.extend([
+                nn.Linear(prev_dim, h_dim),
+                nn.BatchNorm1d(h_dim),
+                nn.LeakyReLU(0.2),
+                nn.Dropout(0.1)
+            ])
+            prev_dim = h_dim
+        
+        decoder_layers.append(nn.Linear(hidden_dims[0], target_dim))
+        self.decoder = nn.Sequential(*decoder_layers)
+        
+        # Scalers for normalization
+        self.context_scaler = StandardScaler()
+        self.target_scaler = StandardScaler()
+        self.feature_scaler = None
+        
+        # Training state
+        self.trained = False
+        
+        # Move to device
+        self.to(self.device)
+    
+    def encode(self, context: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode context to latent distribution parameters"""
+        h = self.encoder(context)
+        mu = self.fc_mu(h)
+        log_var = self.fc_var(h)
+        return mu, log_var
+    
+    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        """Reparameterization trick"""
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def decode(self, z: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        """Decode latent + context to target parameters"""
+        decoder_input = torch.cat([z, context], dim=1)
+        return self.decoder(decoder_input)
+    
+    def forward(self, context: torch.Tensor, target: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Forward pass through β-VAE"""
+        mu, log_var = self.encode(context)
+        z = self.reparameterize(mu, log_var)
+        
+        recon_target = self.decode(z, context)
+        
+        return {
+            'recon_x': recon_target,
+            'input': context,
+            'mu': mu,
+            'log_var': log_var,
+            'z': z
+        }
+    
+    def loss_function(self, results: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        β-VAE loss with capacity annealing
+        
+        Following Burgess et al. (2018) formulation
+        """
+        recons = results['recon_x']
+        input_data = results['input']
+        mu = results['mu']
+        log_var = results['log_var']
+        
+        self.num_iter += 1
+        
+        # Reconstruction loss (MSE for continuous targets)
+        recons_loss = F.mse_loss(recons, input_data, reduction='mean')
+        
+        # KL divergence
+        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu**2 - log_var.exp(), dim=1), dim=0)
+        
+        # Capacity annealing (following original β-VAE paper)
+        if self.gamma > 0:
+            C = min(self.max_capacity, self.max_capacity * self.num_iter / self.capacity_max_iter)
+            capacity_loss = self.gamma * torch.abs(kld_loss - C)
+        else:
+            capacity_loss = self.beta * kld_loss
+        
+        total_loss = recons_loss + capacity_loss
+        
+        return {
+            'loss': total_loss,
+            'Reconstruction_Loss': recons_loss,
+            'KLD': kld_loss,
+            'Capacity_Loss': capacity_loss
+        }
+    
+    def sample(self, context: torch.Tensor, num_samples: int = 1) -> torch.Tensor:
+        """Generate samples from prior"""
+        batch_size = context.shape[0]
+        
+        # Sample from prior
+        z = torch.randn(batch_size, self.latent_dim, device=self.device)
+        
+        samples = []
+        for _ in range(num_samples):
+            z_sample = torch.randn(batch_size, self.latent_dim, device=self.device)
+            sample = self.decode(z_sample, context)
+            samples.append(sample)
+        
+        if num_samples == 1:
+            return samples[0]
+        else:
+            return torch.stack(samples, dim=1)
+    
+    def interpolate(self, context1: torch.Tensor, context2: torch.Tensor,
+                   num_steps: int = 10) -> torch.Tensor:
+        """Interpolate between two contexts in latent space"""
+        with torch.no_grad():
+            # Encode both contexts
+            mu1, _ = self.encode(context1)
+            mu2, _ = self.encode(context2)
+            
+            # Interpolate in latent space
+            interpolations = []
+            for alpha in torch.linspace(0, 1, num_steps):
+                z_interp = (1 - alpha) * mu1 + alpha * mu2
+                context_interp = (1 - alpha) * context1 + alpha * context2
+                
+                recon = self.decode(z_interp, context_interp)
+                interpolations.append(recon)
+            
+            return torch.stack(interpolations, dim=1)
+
+
+class BVAEExpressiveModel:
+    """
+    Complete β-VAE expressive performance model
+    Compatible with YQX system interface
+    """
+    
+    def __init__(self, 
+                 context_dim: int = 9,
+                 target_dim: int = 4,
+                 latent_dim: int = 64,
+                 hidden_dims: List[int] = [256, 128],
+                 beta: float = 4.0,
+                 gamma: float = 1000.0,
+                 use_midihum: bool = False,
+                 learning_rate: float = 1e-3):
+        
+        self.context_dim = context_dim
+        self.target_dim = target_dim
+        self.latent_dim = latent_dim
+        self.hidden_dims = hidden_dims
+        self.beta = beta
+        self.gamma = gamma
+        self.use_midihum = use_midihum
+        self.learning_rate = learning_rate
+        
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Model will be initialized during training
+        self.model = None
+        self.optimizer = None
+        self.scheduler = None
+        
+        # Scalers
+        self.context_scaler = StandardScaler()
+        self.target_scaler = StandardScaler()
+        self.feature_scaler = None
+        
+        self.trained = False
+    
+    def _initialize_model(self, context_dim: int):
+        """Initialize model with correct dimensions"""
+        self.context_dim = context_dim
+        self.model = BetaVAE(
+            context_dim=context_dim,
+            target_dim=self.target_dim,
+            latent_dim=self.latent_dim,
+            hidden_dims=self.hidden_dims,
+            beta=self.beta,
+            gamma=self.gamma,
+            use_midihum=self.use_midihum
+        ).to(self.device)
+        
+        # Setup optimizer
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.learning_rate,
+            weight_decay=1e-4
+        )
+        
+        # Learning rate scheduler
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=1000
+        )
+    
+    def train(self, context_features: np.ndarray, targets: np.ndarray,
+              epochs: int = 1000, batch_size: int = 32):
+        """Train the β-VAE model on pre-extracted features and targets"""
+        print("Training β-VAE model...")
+        print(f"Training on {len(context_features)} samples")
+        
+        # Initialize model with correct dimensions
+        if self.model is None:
+            self._initialize_model(context_features.shape[1])
+        
+        # Scale features and targets
+        context_features = self.context_scaler.fit_transform(context_features)
+        context_features = torch.tensor(context_features, dtype=torch.float32, device=self.device)
+        
+        targets = self.target_scaler.fit_transform(targets)
+        targets = torch.tensor(targets, dtype=torch.float32, device=self.device)
+        
+        # Training loop
+        dataset_size = len(context_features)
+        num_batches = (dataset_size + batch_size - 1) // batch_size
+        
+        self.model.train()
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            epoch_recon_loss = 0.0
+            epoch_kld_loss = 0.0
+            
+            # Shuffle data
+            perm = torch.randperm(dataset_size)
+            context_shuffled = context_features[perm]
+            targets_shuffled = targets[perm]
+            
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, dataset_size)
+                
+                batch_context = context_shuffled[start_idx:end_idx]
+                batch_targets = targets_shuffled[start_idx:end_idx]
+                
+                # Forward pass
+                self.optimizer.zero_grad()
+                results = self.model(batch_context, batch_targets)
+                loss_dict = self.model.loss_function(results)
+                
+                loss = loss_dict['loss']
+                loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                
+                self.optimizer.step()
+                
+                epoch_loss += loss.item()
+                epoch_recon_loss += loss_dict['Reconstruction_Loss'].item()
+                epoch_kld_loss += loss_dict['KLD'].item()
+            
+            self.scheduler.step()
+            
+            if (epoch + 1) % 100 == 0:
+                avg_loss = epoch_loss / num_batches
+                avg_recon = epoch_recon_loss / num_batches
+                avg_kld = epoch_kld_loss / num_batches
+                lr = self.scheduler.get_last_lr()[0]
+                print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, "
+                      f"Recon: {avg_recon:.4f}, KLD: {avg_kld:.4f}, LR: {lr:.6f}")
+        
+        self.trained = True
+        print("β-VAE training completed!")
+    
+    def predict(self, context_features: np.ndarray, 
+                num_samples: int = 1) -> np.ndarray:
+        """Predict targets using β-VAE on pre-extracted features"""
+        if not self.trained:
+            raise ValueError("Model must be trained before prediction")
+        
+        context_features = self.context_scaler.transform(context_features)
+        context_features = torch.tensor(context_features, dtype=torch.float32, device=self.device)
+        
+        # Generate predictions
+        self.model.eval()
+        with torch.no_grad():
+            predictions = self.model.sample(context_features, num_samples=num_samples)
+            
+            if num_samples > 1:
+                # Take mean across samples
+                predictions = predictions.mean(dim=1)
+        
+        # Inverse transform
+        predictions = predictions.cpu().numpy()
+        predictions = self.target_scaler.inverse_transform(predictions)
+        
+        return predictions
+    
+    def get_latent_representation(self, context_features: np.ndarray) -> np.ndarray:
+        """Get latent representations for analysis"""
+        if not self.trained:
+            raise ValueError("Model must be trained before encoding")
+        
+        context_features = self.context_scaler.transform(context_features)
+        context_features = torch.tensor(context_features, dtype=torch.float32, device=self.device)
+        
+        self.model.eval()
+        with torch.no_grad():
+            mu, log_var = self.model.encode(context_features)
+            return mu.cpu().numpy()
+    
+    def save(self, filepath: str, feature_scaler=None):
+        """Save trained β-VAE model"""
+        if feature_scaler is not None:
+            self.feature_scaler = feature_scaler
+            
+        model_data = {
+            'model_state_dict': self.model.state_dict() if self.model else None,
+            'context_scaler': self.context_scaler,
+            'target_scaler': self.target_scaler,
+            'context_dim': self.context_dim,
+            'target_dim': self.target_dim,
+            'latent_dim': self.latent_dim,
+            'hidden_dims': self.hidden_dims,
+            'beta': self.beta,
+            'gamma': self.gamma,
+            'use_midihum': self.use_midihum,
+            'learning_rate': self.learning_rate,
+            'trained': self.trained,
+            'feature_scaler': self.feature_scaler
+        }
+        torch.save(model_data, filepath)
+    
+    def load(self, filepath: str):
+        """Load trained β-VAE model"""
+        model_data = torch.load(filepath, map_location=self.device)
+        
+        # Restore parameters
+        self.context_dim = model_data['context_dim']
+        self.target_dim = model_data['target_dim']
+        self.latent_dim = model_data['latent_dim']
+        self.hidden_dims = model_data['hidden_dims']
+        self.beta = model_data['beta']
+        self.gamma = model_data['gamma']
+        self.use_midihum = model_data['use_midihum']
+        self.learning_rate = model_data['learning_rate']
+        self.trained = model_data['trained']
+        self.feature_scaler = model_data.get('feature_scaler', None)
+        
+        # Recreate model
+        if self.context_dim is not None:
+            self._initialize_model(self.context_dim)
+            if model_data['model_state_dict'] is not None:
+                self.model.load_state_dict(model_data['model_state_dict'])
+        
+        # Restore scalers
+        self.context_scaler = model_data['context_scaler']
+        self.target_scaler = model_data['target_scaler'] 

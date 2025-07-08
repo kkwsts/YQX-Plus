@@ -36,6 +36,12 @@ pip install -r requirements.txt
 # Train GMM with different components
 python yqx.py train.enabled=true model.type=gmm model.gmm.n_components=48
 
+# Train Flow model
+python yqx.py train.enabled=true model.type=flow model.flow.hidden_dim=128
+
+# Train β-VAE model
+python yqx.py train.enabled=true model.type=bvae model.bvae.latent_dim=64 model.bvae.beta=4.0
+
 # Train with MIDIHUM features
 python yqx.py train.enabled=true model.use_midihum_features=true
 
@@ -74,6 +80,25 @@ python yqx.py train.enabled=true test.enabled=true model.gmm.n_components=64 mod
 - `model.gmm.n_components`: Number of Gaussian components (default: 48)
 - `model.gmm.random_state`: Random seed (default: 42)
 
+**Flow Model:**
+- `model.type`: "flow"
+- `model.flow.context_dim`: Input feature dimensionality (default: 9)
+- `model.flow.expression_dim`: Output parameter dimensionality (default: 4)
+- `model.flow.hidden_dim`: Hidden layer size (default: 128)
+- `model.flow.flow_matcher_type`: Type of flow matcher (default: "standard")
+- `model.flow.sigma`: Noise level for flow matching (default: 0.01)
+
+**β-VAE Model:**
+- `model.type`: "bvae"
+- `model.bvae.context_dim`: Input feature dimensionality (default: 9)
+- `model.bvae.target_dim`: Output parameter dimensionality (default: 4)
+- `model.bvae.latent_dim`: Latent space dimensionality (default: 64)
+- `model.bvae.hidden_dims`: Hidden layer sizes (default: [256, 128])
+- `model.bvae.beta`: Disentanglement parameter (default: 4.0)
+- `model.bvae.gamma`: Capacity annealing parameter (default: 1000.0)
+- `model.bvae.learning_rate`: Learning rate for training (default: 0.001)
+- `model.bvae.epochs`: Training epochs (default: 1000)
+- `model.bvae.batch_size`: Training batch size (default: 32)
 
 **General Model Options:**
 - `model.use_midihum_features`: Include MIDIHUM features (default: false)
@@ -100,10 +125,12 @@ python yqx.py train.enabled=true test.enabled=true model.gmm.n_components=64 mod
 ## File Organization
 
 ### Model Files
-Models are automatically named with descriptive parameters:
+Models are automatically named with descriptive parameters and saved using `torch.save()` (`.pkl` extension is just convention):
 - `gmm_nc48.pkl` - GMM with 48 components
 - `gmm_nc32_midihum.pkl` - GMM with 32 components + MIDIHUM features
 - `flow_hd256.pkl` - Flow model with 256 hidden dimensions
+- `bvae_ld64_b4.0.pkl` - β-VAE with 64 latent dimensions, β=4.0
+- `bvae_ld32_b2.0_midihum.pkl` - β-VAE with 32 latent dimensions, β=2.0 + MIDIHUM features
 - `custom_name_gmm_nc64.pkl` - Custom experiment name
 
 ### Test Results
@@ -155,6 +182,7 @@ We took the features from the [MIDIHUM](https://github.com/erwald/midihum) libra
 - `expressivenote.py`: Expressive note data structure
 - `gmm.py`: Bayesian expressive model (GMM-based)
 - `flow.py`: Flow-based expressive model (need update)
+- `bvae.py`: β-VAE expressive model for disentangled representation learning
 - more modelling class to be added
 - `config/default.yml`: Default configuration file
 
