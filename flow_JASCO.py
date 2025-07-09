@@ -453,7 +453,8 @@ class FMExpressiveModel(StreamingModule):
         # Training state
         self.scaler = None
         self.target_scaler = None
-        self.feature_scaler = None  
+        self.feature_scaler = None
+        self.trained = False
         
         # Move model to device
         self.to(self.device)

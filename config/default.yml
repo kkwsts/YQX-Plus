@@ -12,7 +12,6 @@ data:
 # Model configuration
 model:
   type: "gmm"  # Options: "gmm", "flow", "bvae"
-  type: "flow"  # Options: "gmm", "flow"
   use_midihum_features: false
   
   # Model-specific parameters
@@ -21,15 +20,11 @@ model:
     random_state: 42
     
   flow:
-    context_dim: 9
-    expression_dim: 4
     hidden_dim: 128
     flow_matcher_type: "standard"
     sigma: 0.01
     
   bvae:
-    context_dim: 9
-    target_dim: 4
     latent_dim: 64
     hidden_dims: [256, 128]
     beta: 4.0

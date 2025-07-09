@@ -14,7 +14,6 @@ from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
 import partitura as pt
 from tqdm import tqdm
-import matplotlib.pyplot as plt 
 import hook
 import warnings
 from omegaconf import OmegaConf, DictConfig
@@ -396,8 +395,8 @@ class YQXSystem:
             train_kwargs['batch_size'] = bvae_config.get('batch_size', 32)
         elif self.config.model.type == "flow":
             flow_config = self.config.model.flow
-            train_kwargs['epochs'] = self.config.train.get('num_epochs', 100)
-            train_kwargs['batch_size'] = self.config.train.get('batch_size', 32)
+            train_kwargs['epochs'] = flow_config.get('epochs', 100)
+            train_kwargs['batch_size'] = flow_config.get('batch_size', 32)
         
         self.model.train(context_features, targets, **train_kwargs)
         
