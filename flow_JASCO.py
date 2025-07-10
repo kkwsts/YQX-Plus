@@ -126,7 +126,7 @@ class TimeEmbedding(nn.Module):
 class VectorFieldNetwork(nn.Module):
     
     def __init__(self, features_dim: int, expression_dim: int, hidden_dim: int = 128, 
-                 use_midihum: bool = False, num_heads: int = 8, num_layers: int = 8):
+                 use_midihum: bool = False, num_heads: int = 4, num_layers: int = 2):
         super().__init__()
         self.features_dim = features_dim 
         self.expression_dim = expression_dim
@@ -238,7 +238,7 @@ class VectorFieldNetwork(nn.Module):
 class FMExpressiveModel(StreamingModule):
     
     def __init__(self, features_dim: int = None, expression_dim: int = 4, hidden_dim: int = 128, epochs: int = 1000,
-                 use_midihum: bool = False, flow_matcher_type: str = "optimal_transport", sigma: float = 0.01, 
+                 use_midihum: bool = False, flow_matcher_type: str = "standard", sigma: float = 0.01, 
                  device: str = "cpu", num_heads: int = 4, num_layers: int = 2):
         super().__init__()
         
@@ -544,31 +544,13 @@ class FMExpressiveModel(StreamingModule):
         
         # Return final state (trajectory[-1] is at t=1)
         return trajectory[-1]
+    
 
-    def predict(self, notes: List[ExpressiveNote], feature_extractor, 
-                integration_method: str = "euler") -> List[ExpressiveNote]:
-        """
-        Args:
-            notes: Input notes to predict expressions for
-            feature_extractor: Feature extraction system
-            integration_method: "euler", "midpoint", "rk4", "odeint", "dopri5"
+    def predict(self, notes: List[ExpressiveNote], 
+                integration_method: str = "dopri5") -> List[ExpressiveNote]:
         
-        Returns:
-            Notes with predicted expressive parameters
-        """
-        if len(notes) == 0:
-            return []
-        
-        features_array = feature_extractor.encode_features(
-            notes, fit=False, use_midihum=self.use_midihum
-        )
-        
-        # Apply scaling if available
-        if self.scaler is not None:
-            features_array = self.scaler.transform(features_array)
-        
-        # Convert to tensor
-        features_tensor = self._to_device(torch.FloatTensor(features_array))
+        features_array = self.scaler.transform(notes)
+        features_tensor = torch.tensor(features_array, dtype=torch.float32, device=self.device)
         
         # Generate predictions using enhanced sampling
         with torch.no_grad():
@@ -581,45 +563,17 @@ class FMExpressiveModel(StreamingModule):
                     ode_atol=1e-5
                 )
             else:
-                # Use fixed-step methods
                 predictions = self.sample(
                     features_tensor, 
-                    n_steps=100 if integration_method == "rk4" else 50,
+                    n_steps=100 if integration_method == "euler" else 50,
                     method=integration_method
                 )
         
-        predictions_np = predictions.numpy()
+    
+        predictions = predictions.numpy()
+        predictions = self.target_scaler.inverse_transform(predictions)
         
-        # Apply inverse scaling if available
-        if self.target_scaler is not None:
-            predictions_np = self.target_scaler.inverse_transform(predictions_np)
-        
-        # Create new notes with predictions
-        predicted_notes = []
-        for i, note in enumerate(notes):
-            if i >= len(predictions_np):
-                break
-                
-            pred = predictions_np[i]
-            new_note = ExpressiveNote(
-                pitch=note.pitch,
-                onset_beat=note.onset_beat,
-                duration_beat=note.duration_beat,
-                voice=note.voice,
-                pitch_interval=note.pitch_interval,
-                duration_ratio=note.duration_ratio,
-                rhythmic_context=note.rhythmic_context,
-                ir_label=note.ir_label,
-                ir_closure=note.ir_closure,
-                position_in_phrase=note.position_in_phrase,
-                beat_period=float(pred[0]),
-                timing=float(pred[1]),
-                velocity=float(pred[2]),
-                articulation_log=float(pred[3])
-            )
-            predicted_notes.append(new_note)
-        
-        return predicted_notes
+        return predictions
 
     def save(self, filepath: str, feature_scaler=None):
         if feature_scaler is not None:
