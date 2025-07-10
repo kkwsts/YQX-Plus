@@ -12,74 +12,16 @@ from expressivenote import *
 from torchdiffeq import odeint
 import audiocraft
 from audiocraft.modules.streaming import StreamingModule
-from audiocraft.modules.transformer import StreamingTransformerLayer
-from audiocraft.modules.conditioners import (
-    ConditioningAttributes, 
-    ConditionFuser,
-    ClassifierFreeGuidanceDropout,
-    AttributeDropout,
-    ConditionType
-)
-try:
-    from audiocraft.models.lm import ConditionTensors
-except ImportError:
-    ConditionTensors = tp.Dict[str, ConditionType]
+from audiocraft.modules.transformer import StreamingTransformerLayer, create_norm_fn
+from audiocraft.modules.unet_transformer import UnetTransformer
 
+from torchcfm.conditional_flow_matching import ConditionalFlowMatcher
+from torchcfm.conditional_flow_matching import ExactOptimalTransportConditionalFlowMatcher
 
-
-class ConditionalFlowMatcher:    
-    def __init__(self, sigma: float = 0.0, schedule_type: str = "linear"):
-        self.sigma = sigma
-        self.schedule_type = schedule_type
-        
-        self.schedule = None
-
-    def compute_mu_t(self, x0, x1, t):
-        """Mean of the flow path"""
-        t = self._pad_t_like_x(t, x0)
-        return t * x1 + (1 - t) * x0 # linear interpolation
-
-    def compute_sigma_t(self, t):
-        """Variance of the flow path"""
-        if self.schedule_type == "cosine":
-            return self.sigma * (1 - torch.cos(t * torch.pi / 2))
-        else:
-            return self.sigma
-
-    def sample_xt(self, x0, x1, t, epsilon):
-        """Sample from the flow path at time t"""
-        mu_t = self.compute_mu_t(x0, x1, t)
-        sigma_t = self.compute_sigma_t(t)
-        sigma_t = self._pad_t_like_x(sigma_t, x0)
-        return mu_t + sigma_t * epsilon
-
-    def compute_conditional_flow(self, x0, x1, t, xt):
-        """Compute the conditional flow (vector field)"""
-        del t, xt
-        return x1 - x0
-
-    def sample_location_and_conditional_flow(self, x0, x1, t=None, return_noise=False):
-        """Sample location and corresponding flow"""
-        if t is None:
-            t = torch.rand(x0.shape[0]).type_as(x0)
-        
-        eps = torch.randn_like(x0)
-        xt = self.sample_xt(x0, x1, t, eps)
-        ut = self.compute_conditional_flow(x0, x1, t, xt)
-        
-        if return_noise:
-            return t, xt, ut, eps
-        else:
-            return t, xt, ut
-
-    def _pad_t_like_x(self, t, x):
-        if isinstance(t, (float, int)):
-            return t
-        return t.reshape(-1, *([1] * (x.dim() - 1)))
 
 
 class AudioCraftTransformerBlock(nn.Module):
-    """AudioCraft-inspired transformer block for musical context processing"""
+    """Transformer block for musical context processing"""
     def __init__(self, dim: int, num_heads: int, hidden_scale: int = 4):
         super().__init__()
         self.dim = dim
@@ -111,46 +53,8 @@ class AudioCraftTransformerBlock(nn.Module):
         return self.transformer_layer(x)
 
 
-class MusicalContextEncoder(nn.Module):    
-    def __init__(self, features_dim: int, dim: int = 128, num_heads: int = 8, num_layers: int = 4):
-        super().__init__()
-        self.features_dim = features_dim
-        self.dim = dim
-        
-        self.input_proj = nn.Linear(features_dim, dim)
-        
-        # Transformer layers
-        self.transformer_blocks = nn.ModuleList([
-            AudioCraftTransformerBlock(dim, num_heads)
-            for _ in range(num_layers)
-        ])
-        
-        self.output_proj = nn.Linear(dim, dim)
-        self.norm = nn.LayerNorm(dim)
-        
-    def forward(self, features):
-        """
-        Args:
-            features: [batch_size, features_dim]
-        Returns:
-            encoded_context: [batch_size, dim]
-        """
-        x = self.input_proj(features)  # [B, dim]
-        x = x.unsqueeze(1)  # [B, 1, dim]
-        
-        # Apply transformer blocks
-        for block in self.transformer_blocks:
-            x = block(x)
-        
-        x = x.squeeze(1)  # [B, dim]
-        x = self.output_proj(x)
-        x = self.norm(x)
-        
-        return x
-
 
 class TimeEmbedding(nn.Module):
-
     def __init__(self, time_embedding_dim: int = 128):
         super().__init__()
         self.d_temb1 = time_embedding_dim
@@ -179,8 +83,7 @@ class TimeEmbedding(nn.Module):
 
         half_dim = embedding_dim // 2
         emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
-        emb = emb.to(device=timesteps.device)
+        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32, device=timesteps.device) * -emb)
         emb = timesteps.float()[:, None] * emb[None, :]
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
         if embedding_dim % 2 == 1:  # zero pad
@@ -221,158 +124,66 @@ class TimeEmbedding(nn.Module):
         return self.temb_proj(temb)
 
 
-class MusicalConditioningSystem(nn.Module):
-    """
-    Multi-modal conditioning system for musical features
-    
-    FEATURE STRUCTURE:
-    - features = basic_features + midihum_features (when use_midihum=True)
-               = basic_features (when use_midihum=False)
-    """
-    
-    def __init__(self, basic_dim: int = 9, hidden_dim: int = 128, use_midihum: bool = False):
-        super().__init__()
-        self.basic_dim = basic_dim
-        self.hidden_dim = hidden_dim
-        self.use_midihum = use_midihum
-        
-        # Feature dimensions
-        self.midihum_dim = 202  # Approximate midihum feature count
-        self.features_dim = basic_dim + (self.midihum_dim if use_midihum else 0) 
-        
-        self.basic_encoder = MusicalContextEncoder(
-            features_dim=basic_dim,
-            dim=hidden_dim,
-            num_heads=8,
-            num_layers=4
-        )
-        
-        if use_midihum:
-            self.harmonic_encoder = nn.Sequential(
-                nn.Linear(15, hidden_dim // 2),  # Chord context features
-                nn.ReLU(),
-                nn.Linear(hidden_dim // 2, hidden_dim // 2)
-            )
-            
-            self.statistical_encoder = nn.Sequential(
-                nn.Linear(96, hidden_dim),  # SMA features
-                nn.ReLU(), 
-                nn.Linear(hidden_dim, hidden_dim)
-            )
-            
-            self.technical_encoder = nn.Sequential(
-                nn.Linear(60, hidden_dim // 2),  # Technical indicators
-                nn.ReLU(),
-                nn.Linear(hidden_dim // 2, hidden_dim // 2)
-            )
-            
-            self.timing_encoder = nn.Sequential(
-                nn.Linear(30, hidden_dim // 2),  # Timing features
-                nn.ReLU(),
-                nn.Linear(hidden_dim // 2, hidden_dim // 2)
-            )
-            
-            # AudioCraft-style condition fuser
-            try:
-                self.condition_fuser = ConditionFuser(
-                    fuse2cond={
-                        'basic': [0],           # Basic musical features
-                        'harmonic': [1],        # Harmonic context
-                        'statistical': [2],     # Statistical features
-                        'technical': [3],       # Technical indicators
-                        'timing': [4]           # Timing features
-                    },
-                    dim=hidden_dim
-                )
-            except:
-                # Fallback: simple concatenation + projection
-                self.condition_fuser = nn.Sequential(
-                    nn.Linear(hidden_dim * 3, hidden_dim),  # basic + harmonic + statistical + technical + timing
-                    nn.ReLU(),
-                    nn.Linear(hidden_dim, hidden_dim)
-                )
-        
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """
-        Process multi-modal musical features
-        
-        Args:
-            features: [batch_size, features_dim] where features = basic_features + midihum_features
-        Returns:
-            Fused conditioning: [batch_size, hidden_dim]
-        """
-        if not self.use_midihum:
-            basic_features = features
-            return self.basic_encoder(basic_features)
-        
-        basic_features = features[:, :self.basic_dim]           # [batch, 9]
-        midihum_features = features[:, self.basic_dim:]         # [batch, ~202]
-        
-        # Encode basic features
-        basic_encoded = self.basic_encoder(basic_features)      # [batch, hidden_dim]
-        
-        harmonic_features = midihum_features[:, :15]            # Chord context [batch, 15]
-        statistical_features = midihum_features[:, 15:111]      # SMA features [batch, 96]
-        technical_features = midihum_features[:, 111:171]       # Technical indicators [batch, 60]
-        timing_features = midihum_features[:, 171:201]          # Timing features [batch, 30]
-        
-        harmonic_encoded = self.harmonic_encoder(harmonic_features)         # [batch, hidden_dim//2]
-        statistical_encoded = self.statistical_encoder(statistical_features) # [batch, hidden_dim]
-        technical_encoded = self.technical_encoder(technical_features)       # [batch, hidden_dim//2]
-        timing_encoded = self.timing_encoder(timing_features)               # [batch, hidden_dim//2]
-        
-        # Fuse all modalities
-        if hasattr(self.condition_fuser, 'fuse2cond'):
-            # AudioCraft ConditionFuser
-            conditions = {
-                'basic': basic_encoded.unsqueeze(1),
-                'harmonic': harmonic_encoded.unsqueeze(1),
-                'statistical': statistical_encoded.unsqueeze(1),
-                'technical': technical_encoded.unsqueeze(1),
-                'timing': timing_encoded.unsqueeze(1)
-            }
-            fused = self.condition_fuser(conditions)
-            return fused.squeeze(1)
-        else:
-            # Fallback: concatenate and project
-            concatenated = torch.cat([
-                basic_encoded,
-                harmonic_encoded,
-                statistical_encoded
-            ], dim=1)
-            return self.condition_fuser(concatenated)
-
-
 class VectorFieldNetwork(nn.Module):
-    """Enhanced vector field network"""
     
-    def __init__(self, features_dim: int, target_dim: int, hidden_dim: int = 128, use_midihum: bool = False):
+    def __init__(self, features_dim: int, target_dim: int, hidden_dim: int = 128, 
+                 use_midihum: bool = False, num_heads: int = 4, num_layers: int = 2):
         super().__init__()
         self.features_dim = features_dim 
         self.target_dim = target_dim
         self.hidden_dim = hidden_dim
         self.use_midihum = use_midihum
+        self.num_heads = num_heads
+        self.num_layers = num_layers
         
-        # Multi-modal conditioning system
-        self.conditioning_system = MusicalConditioningSystem(
-            basic_dim=9,
-            hidden_dim=hidden_dim,
-            use_midihum=use_midihum
-        )
-        
+        if use_midihum:
+            input_features_dim = 6 + 171  
+        else:
+            input_features_dim = 9 
+            
         self.time_embedding = TimeEmbedding(hidden_dim)
+
+        self.input_embedding = nn.Linear(expression_dim + input_features_dim, hidden_dim, bias=False)
         
-        self.main_network = nn.Sequential(
-            nn.Linear(target_dim + hidden_dim + hidden_dim, hidden_dim * 2),
-            nn.SiLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
-            nn.SiLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, target_dim)
-        )
+        try:
+            self.transformer = UnetTransformer(
+                d_model=hidden_dim,
+                num_heads=num_heads,
+                dim_feedforward=int(4 * hidden_dim),
+                norm='layer_norm',
+                norm_first=True,
+                layer_class=StreamingTransformerLayer,
+                num_layers=num_layers,
+                dropout=0.1,
+                activation='gelu'
+            )
+            self.uses_audiocraft = True
+        except Exception as e:
+            self.transformer = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(
+                    d_model=hidden_dim,
+                    nhead=num_heads,
+                    dim_feedforward=int(4 * hidden_dim),
+                    dropout=0.1,
+                    activation='gelu',
+                    norm_first=True,
+                    batch_first=True
+                ),
+                num_layers=num_layers
+            )
+            self.uses_audiocraft = False
+            
+        self.out_norm = create_norm_fn('layer_norm', hidden_dim)
+        self.output_projection = nn.Linear(hidden_dim, expression_dim, bias=True)
         
-        self.expression_proj = nn.Linear(target_dim, target_dim)
+        self._init_weights()
+        
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
 
     def forward(self, t: torch.Tensor, x: torch.Tensor, features: torch.Tensor):
         """
@@ -392,61 +203,75 @@ class VectorFieldNetwork(nn.Module):
         elif t.dim() == 2:
             t = t.squeeze(-1)
         
-
-        features_encoded = self.conditioning_system(features)  # [B, hidden_dim]
-        
+        # Time embedding
         time_embedded = self.time_embedding(t)  # [B, hidden_dim]
         
-        combined_input = torch.cat([x, features_encoded, time_embedded], dim=1)
+        # Combine expression state and features
+        combined_input = torch.cat([x, features], dim=1)  # [B, expression_dim + features_dim]
         
-        output = self.main_network(combined_input)
+        # Input embedding
+        embedded = self.input_embedding(combined_input)  # [B, hidden_dim]
         
-        residual = self.expression_proj(x)
+        # Add time embedding
+        embedded = embedded + time_embedded  # [B, hidden_dim]
         
-        return output + residual
+        # Add sequence dimension for transformer
+        embedded = embedded.unsqueeze(1)  # [B, 1, hidden_dim]
+        
+        if self.uses_audiocraft:
+            # AudioCraft UnetTransformer
+            transformer_output = self.transformer(embedded)  # [B, 1, hidden_dim]
+        else:
+            # PyTorch Transformer
+            transformer_output = self.transformer(embedded)  # [B, 1, hidden_dim]
+            
+        # Remove sequence dimension
+        transformer_output = transformer_output.squeeze(1)  # [B, hidden_dim]
+        
+        # Output normalization and projection
+        normalized = self.out_norm(transformer_output)
+        vector_field = self.output_projection(normalized)  # [B, expression_dim]
+        
+        return vector_field
+
 
 
 class FMExpressiveModel(StreamingModule):
-    """Enhanced Flow Matching model for expressive music performance with AudioCraft integration"""
     
-    def __init__(self, features_dim: int = None, target_dim: int = 4, hidden_dim: int = 128, 
-                 use_midihum: bool = False, flow_matcher_type: str = "standard", sigma: float = 0.01, device: str = "cpu"):
+    def __init__(self, features_dim: int = None, target_dim: int = 4, hidden_dim: int = 128, epochs: int = 1000,
+                 use_midihum: bool = False, flow_matcher_type: str = "standard", sigma: float = 0.01, 
+                 device: str = "cpu", num_heads: int = 4, num_layers: int = 2):
         super().__init__()
         
-        # Calculate features_dim based on use_midihum if not provided
-        if features_dim is None:
-            if use_midihum:
-                self.features_dim = 9 + 202  # basic (9) + midihum (202) = 211
-            else:
-                self.features_dim = 9  # basic features only
-        else:
-            self.features_dim = features_dim
+        self.features_dim = features_dim
         
         self.target_dim = target_dim
         self.hidden_dim = hidden_dim
         self.use_midihum = use_midihum
+        self.epochs = epochs
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.flow_matcher_type = flow_matcher_type
         
         self.device = torch.device(device)
         
         print(f"Initializing FMExpressiveModel with features_dim={self.features_dim}, "
               f"target_dim={target_dim}, use_midihum={use_midihum}, device={self.device}")
         
-        try:
-            self.flow_matcher = ConditionalFlowMatcher(
-                sigma=sigma, 
-                schedule_type="cosine"
-            )
-        except Exception as e:
-            self.flow_matcher = ConditionalFlowMatcher(
-                sigma=sigma, 
-                schedule_type="linear"
-            )
+        if flow_matcher_type == "optimal_transport":
+            self.flow_matcher = ExactOptimalTransportConditionalFlowMatcher(sigma=sigma)
+        # elif flow_matcher_type == "target":
+        #     self.flow_matcher = TargetConditionalFlowMatcher(sigma=sigma)
+        else:
+            self.flow_matcher = ConditionalFlowMatcher(sigma=sigma)
         
         self.vector_field_network = VectorFieldNetwork(
             features_dim=self.features_dim,
             target_dim=target_dim,
             hidden_dim=hidden_dim,
-            use_midihum=use_midihum
+            use_midihum=use_midihum,
+            num_heads=num_heads,
+            num_layers=num_layers
         )
         
         # Training state
@@ -482,25 +307,26 @@ class FMExpressiveModel(StreamingModule):
         Returns:
             Loss value
         """
-        features = self._to_device(features)
-        target = self._to_device(target)
-        
+        # features = self._to_device(features)
+        # target = self._to_device(target)
         batch_size = target.shape[0]
         
-        # Sample noise
         x0 = torch.randn_like(target)
+        x1 = target
         
-        # Sample time and compute flow
-        t, xt, ut = self.flow_matcher.sample_location_and_conditional_flow(x0, target)
+        # Sample time uniformly
+        t = torch.rand(batch_size, device=target.device)
         
-        # Predict vector field using features (basic + midihum if enabled)
+        epsilon = torch.randn_like(target)
+        
+        xt = self.flow_matcher.sample_xt(x0, x1, t, epsilon)
+        ut = self.flow_matcher.compute_conditional_flow(x0, x1, t, xt)
+        
         vt_pred = self.vector_field(t, xt, features)
         
         # Compute MSE loss
         loss = F.mse_loss(vt_pred, ut)
-        
-        l2_reg = sum(p.pow(2.0).sum() for p in self.vector_field_network.parameters())
-        loss = loss + 1e-5 * l2_reg
+
         
         return loss
 
@@ -516,7 +342,7 @@ class FMExpressiveModel(StreamingModule):
                 
             # Extract context features
             contexts = feature_extractor.encode_features(
-                note_sequence, fit=False, use_midihum=self.use_midihum
+                note_sequence, fit=True, use_midihum=self.use_midihum
             )
             
             # Extract targets
@@ -548,7 +374,6 @@ class FMExpressiveModel(StreamingModule):
         
         print(f"Training data shape: X={X.shape}, y={y.shape}")
         
-        # Initialize or update scalers
         if self.scaler is None:
             self.scaler = StandardScaler()
             X = self.scaler.fit_transform(X)
@@ -565,23 +390,28 @@ class FMExpressiveModel(StreamingModule):
         y_tensor = self._to_device(torch.FloatTensor(y))
         
         dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        dataloader = torch.utils.data.DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=True,
+            # num_workers=4, 
+            # pin_memory=False, 
+            # drop_last=True
+        )
         
-        try:
-            optimizer = torch.optim.AdamW(
-                self.parameters(), 
-                lr=1e-4, 
-                weight_decay=1e-4,
-                betas=(0.9, 0.95)
-            )
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
-        except:
-            optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-            scheduler = None
+        optimizer = torch.optim.AdamW(
+            self.parameters(), 
+            lr=1e-4, 
+            weight_decay=1e-4,
+            betas=(0.9, 0.95), 
+            # eps=1e-8
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+        
         
         self.train_mode = True
         best_loss = float('inf')
-        patience = 100
+        patience = max(10, epochs // 10) 
         patience_counter = 0
         
         for epoch in range(epochs):
@@ -615,29 +445,19 @@ class FMExpressiveModel(StreamingModule):
                 print(f"Early stopping at epoch {epoch}")
                 break
             
-            # Log to wandb
-            wandb.log({
-                "epoch": epoch,
-                "flow_loss": avg_loss,
-                "learning_rate": lr
-            })
-            
-            # Print progress
-            if epoch % 100 == 0:
+            if (epoch + 1) % 50 == 0:
                 lr = optimizer.param_groups[0]['lr']
-                print(f"Epoch {epoch}, Loss: {avg_loss:.6f}, LR: {lr:.2e}")
+                print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, LR: {lr:.2e}")
         
         print(f"Training completed. Final loss: {best_loss:.6f}")
 
     def sample(self, features: torch.Tensor, n_steps: int = 50, method: str = "dopri5", 
                ode_rtol: float = 1e-5, ode_atol: float = 1e-5) -> torch.Tensor:
-        """
-        Enhanced sampling with multiple integration methods
-        
+        """        
         Args:
             features: Musical features [batch_size, features_dim]
             n_steps: Number of integration steps (for fixed-step methods)
-            method: Integration method ("euler", "midpoint", "rk4", "odeint", "dopri5")
+            method: Integration method ("euler", "odeint", "dopri5")
             ode_rtol: Relative tolerance for adaptive ODE solver
             ode_atol: Absolute tolerance for adaptive ODE solver
             
@@ -662,28 +482,12 @@ class FMExpressiveModel(StreamingModule):
             dt = 1.0 / n_steps
             
             for i in range(n_steps):
-                t = self._to_device(torch.full((batch_size,), i * dt))
+                t = torch.full((batch_size,), i * dt, device=x.device, dtype=x.dtype)
                 
                 if method == "euler":
                     # Euler method
                     vt = self.vector_field(t, x, features)
                     x = x + dt * vt
-                    
-                elif method == "midpoint":
-                    # Midpoint method (Runge-Kutta 2)
-                    vt1 = self.vector_field(t, x, features)
-                    x_mid = x + 0.5 * dt * vt1
-                    t_mid = t + 0.5 * dt
-                    vt2 = self.vector_field(t_mid, x_mid, features)
-                    x = x + dt * vt2
-                    
-                elif method == "rk4":
-                    # Runge-Kutta 4th order
-                    k1 = self.vector_field(t, x, features)
-                    k2 = self.vector_field(t + 0.5*dt, x + 0.5*dt*k1, features)
-                    k3 = self.vector_field(t + 0.5*dt, x + 0.5*dt*k2, features)
-                    k4 = self.vector_field(t + dt, x + dt*k3, features)
-                    x = x + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
                     
                 else:
                     raise ValueError(f"Unknown integration method: {method}")
@@ -723,7 +527,7 @@ class FMExpressiveModel(StreamingModule):
             return self.vector_field(t_batch, x, features)
         
         # Time span: integrate from 0 to 1 (following flow matching convention)
-        t_span = torch.tensor([0.0, 1.0 - 1e-5], device=x_0.device)  # Avoid t=1 exactly
+        t_span = torch.tensor([0.0, 1.0 - 1e-5], device=x_0.device, dtype=x_0.dtype)  # Avoid t=1 exactly
         
         # Choose solver method
         solver_method = "dopri5" if method in ["odeint", "dopri5"] else "euler"
@@ -741,31 +545,13 @@ class FMExpressiveModel(StreamingModule):
         
         # Return final state (trajectory[-1] is at t=1)
         return trajectory[-1]
+    
 
-    def predict(self, notes: List[ExpressiveNote], feature_extractor, 
-                integration_method: str = "euler") -> List[ExpressiveNote]:
-        """        
-        Args:
-            notes: Input notes to predict expressions for
-            feature_extractor: Feature extraction system
-            integration_method: "euler", "midpoint", "rk4", "odeint", "dopri5"
+    def predict(self, notes: List[ExpressiveNote], 
+                integration_method: str = "dopri5") -> List[ExpressiveNote]:
         
-        Returns:
-            Notes with predicted expressive parameters
-        """
-        if len(notes) == 0:
-            return []
-        
-        features_array = feature_extractor.encode_features(
-            notes, fit=False, use_midihum=self.use_midihum
-        )
-        
-        # Apply scaling if available
-        if self.scaler is not None:
-            features_array = self.scaler.transform(features_array)
-        
-        # Convert to tensor
-        features_tensor = self._to_device(torch.FloatTensor(features_array))
+        features_array = self.scaler.transform(notes)
+        features_tensor = torch.tensor(features_array, dtype=torch.float32, device=self.device)
         
         # Generate predictions using enhanced sampling
         with torch.no_grad():
@@ -778,45 +564,17 @@ class FMExpressiveModel(StreamingModule):
                     ode_atol=1e-5
                 )
             else:
-                # Use fixed-step methods
                 predictions = self.sample(
                     features_tensor, 
-                    n_steps=100 if integration_method == "rk4" else 50,
+                    n_steps=100 if integration_method == "euler" else 50,
                     method=integration_method
                 )
         
-        predictions_np = predictions.numpy()
+    
+        predictions = predictions.numpy()
+        predictions = self.target_scaler.inverse_transform(predictions)
         
-        # Apply inverse scaling if available
-        if self.target_scaler is not None:
-            predictions_np = self.target_scaler.inverse_transform(predictions_np)
-        
-        # Create new notes with predictions
-        predicted_notes = []
-        for i, note in enumerate(notes):
-            if i >= len(predictions_np):
-                break
-                
-            pred = predictions_np[i]
-            new_note = ExpressiveNote(
-                pitch=note.pitch,
-                onset_beat=note.onset_beat,
-                duration_beat=note.duration_beat,
-                voice=note.voice,
-                pitch_interval=note.pitch_interval,
-                duration_ratio=note.duration_ratio,
-                rhythmic_context=note.rhythmic_context,
-                ir_label=note.ir_label,
-                ir_closure=note.ir_closure,
-                position_in_phrase=note.position_in_phrase,
-                beat_period=float(pred[0]),
-                timing=float(pred[1]),
-                velocity=float(pred[2]),
-                articulation_log=float(pred[3])
-            )
-            predicted_notes.append(new_note)
-        
-        return predicted_notes
+        return predictions
 
     def save(self, filepath: str, feature_scaler=None):
         if feature_scaler is not None:
@@ -834,7 +592,7 @@ class FMExpressiveModel(StreamingModule):
             'feature_scaler': getattr(self, 'feature_scaler', None),  # Save feature_scaler if available
         }
         torch.save(save_dict, filepath)
-        print(f"Enhanced model saved to {filepath}")
+        print(f"Model saved to {filepath}")
 
     def load(self, filepath: str):
         """Enhanced load with AudioCraft compatibility"""
@@ -875,7 +633,6 @@ class FMExpressiveModel(StreamingModule):
         # Load model state
         try:
             self.load_state_dict(checkpoint['model_state_dict'])
-            print(f"Enhanced model loaded from {filepath}")
         except Exception as e:
             print(f"Error loading model state: {e}")
             print("This might be due to AudioCraft availability mismatch. Consider retraining.")
