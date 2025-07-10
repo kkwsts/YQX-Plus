@@ -5,9 +5,15 @@ defaults:
 
 # Data paths
 data:
-  vienna4x22_dir: "/Users/kkwsts/Datasets/vienna4x22"
-  asap_dir: "/Users/kkwsts/Datasets/asap-dataset-alignment"
+  vienna4x22_dir: "/homes/hz009/Research/Datasets/vienna4x22"
+  # vienna4x22_dir: "/Users/kkwsts/Datasets/vienna4x22"
+  use_vienna4x22: true
+  asap_dir: "/import/c4dm-datasets-ext/asap-dataset/"
+  # asap_dir: "/Users/kkwsts/Datasets/asap-dataset-alignment"
   use_asap: false
+  atepp_dir: "/homes/hz009/Research/Datasets/ATEPP-1.1"
+  atepp_meta_csv: "/homes/hz009/Research/Datasets/ATEPP-1.1/ATEPP-metadata-1.3.csv"
+  use_atepp: false
 
 # Model configuration
 model:
@@ -28,13 +34,11 @@ model:
     latent_dim: 64
     hidden_dims: [256, 128]
     beta: 4.0
-    gamma: 1000.0
+    gamma: 10.0
     learning_rate: 0.001
     epochs: 1000
     batch_size: 32
 
-  # Model path
-  model_path: "${output.ckpt_dir}/yqx_${model.type}_model.pkl"
   device: "cpu"  # Options: "cpu", "cuda:0", etc.
 
 # Training configuration
@@ -43,7 +47,6 @@ train:
   batch_size: 32
   num_epochs: 1000
   learning_rate: 0.001
-  validation_split: 0.2
 
 # Testing configuration
 test:

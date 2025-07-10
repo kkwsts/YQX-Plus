@@ -5,6 +5,8 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List, Tuple, Dict, Optional
 from sklearn.preprocessing import StandardScaler
+from torchinfo import summary
+import wandb
 
 from expressivenote import ExpressiveNote
 
@@ -26,10 +28,11 @@ class BetaVAE(nn.Module):
                  latent_dim: int = 64,
                  hidden_dims: List[int] = [256, 128],
                  beta: float = 1.0,
-                 gamma: float = 1000.0,
-                 max_capacity: int = 25,
-                 capacity_max_iter: int = 1e5,
-                 use_midihum: bool = False):
+                 gamma: float = 10.0,
+                 max_capacity: int = 10,
+                 capacity_max_iter: int = 20,
+                 use_midihum: bool = False,
+                 device: Optional[torch.device] = None):
         super(BetaVAE, self).__init__()
         
         self.context_dim = context_dim
@@ -42,7 +45,7 @@ class BetaVAE(nn.Module):
         self.use_midihum = use_midihum
         self.num_iter = 0
         
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device
         
         # Build encoder: context -> latent (no target input to avoid leakage)
         encoder_layers = []
@@ -118,7 +121,7 @@ class BetaVAE(nn.Module):
         
         return {
             'recon_x': recon_target,
-            'input': context,
+            'target': target,
             'mu': mu,
             'log_var': log_var,
             'z': z
@@ -131,14 +134,14 @@ class BetaVAE(nn.Module):
         Following Burgess et al. (2018) formulation
         """
         recons = results['recon_x']
-        input_data = results['input']
+        target = results['target']
         mu = results['mu']
         log_var = results['log_var']
         
         self.num_iter += 1
         
         # Reconstruction loss (MSE for continuous targets)
-        recons_loss = F.mse_loss(recons, input_data, reduction='mean')
+        recons_loss = F.mse_loss(recons, target, reduction='mean')
         
         # KL divergence
         kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu**2 - log_var.exp(), dim=1), dim=0)
@@ -168,7 +171,7 @@ class BetaVAE(nn.Module):
         
         samples = []
         for _ in range(num_samples):
-            z_sample = torch.randn(batch_size, self.latent_dim, device=self.device)
+            z_sample = torch.randn(batch_size, self.latent_dim).to(self.device)
             sample = self.decode(z_sample, context)
             samples.append(sample)
         
@@ -211,7 +214,8 @@ class BVAEExpressiveModel:
                  beta: float = 4.0,
                  gamma: float = 1000.0,
                  use_midihum: bool = False,
-                 learning_rate: float = 1e-3):
+                 learning_rate: float = 1e-3,
+                 device: str = 'cpu'):
         
         self.context_dim = context_dim
         self.target_dim = target_dim
@@ -222,7 +226,7 @@ class BVAEExpressiveModel:
         self.use_midihum = use_midihum
         self.learning_rate = learning_rate
         
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device
         
         # Model will be initialized during training
         self.model = None
@@ -235,6 +239,8 @@ class BVAEExpressiveModel:
         self.feature_scaler = None
         
         self.trained = False
+        
+        self._initialize_model(context_dim)
     
     def _initialize_model(self, context_dim: int):
         """Initialize model with correct dimensions"""
@@ -246,7 +252,8 @@ class BVAEExpressiveModel:
             hidden_dims=self.hidden_dims,
             beta=self.beta,
             gamma=self.gamma,
-            use_midihum=self.use_midihum
+            use_midihum=self.use_midihum,
+            device=self.device
         ).to(self.device)
         
         # Setup optimizer
@@ -260,16 +267,14 @@ class BVAEExpressiveModel:
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=1000
         )
+        
+        print(summary(self.model))
     
     def train(self, context_features: np.ndarray, targets: np.ndarray,
               epochs: int = 1000, batch_size: int = 32):
         """Train the β-VAE model on pre-extracted features and targets"""
         print("Training β-VAE model...")
         print(f"Training on {len(context_features)} samples")
-        
-        # Initialize model with correct dimensions
-        if self.model is None:
-            self._initialize_model(context_features.shape[1])
         
         # Scale features and targets
         context_features = self.context_scaler.fit_transform(context_features)
@@ -318,6 +323,16 @@ class BVAEExpressiveModel:
                 epoch_kld_loss += loss_dict['KLD'].item()
             
             self.scheduler.step()
+            
+            # Log to wandb
+            wandb.log({
+                "epoch": epoch ,
+                "bvae_total_loss": loss.item(),
+                "bvae_reconstruction_loss": loss_dict['Reconstruction_Loss'].item(),
+                "bvae_kld_loss": loss_dict['KLD'].item(),
+                "bvae_capacity_loss": loss_dict['Capacity_Loss'].item(),
+                "learning_rate": self.scheduler.get_last_lr()[0]
+            })
             
             if (epoch + 1) % 100 == 0:
                 avg_loss = epoch_loss / num_batches
@@ -413,4 +428,56 @@ class BVAEExpressiveModel:
         
         # Restore scalers
         self.context_scaler = model_data['context_scaler']
-        self.target_scaler = model_data['target_scaler'] 
+        self.target_scaler = model_data['target_scaler']
+
+    def model_summary(self):
+        """Print detailed model architecture and parameter summary"""
+        if self.model is None:
+            print("Model not initialized yet. Please train or load a model first.")
+            return
+        
+        if summary is None:
+            print("Model summary not available. Please install torchinfo or torchsummary:")
+            print("pip install torchinfo")
+            return
+        
+        print("=" * 80)
+        print("β-VAE Expressive Model Summary")
+        print("=" * 80)
+        
+        # Wrapper configuration
+        print("Wrapper Configuration:")
+        print(f"  • Context dimension: {self.context_dim}")
+        print(f"  • Target dimension: {self.target_dim}")
+        print(f"  • Latent dimension: {self.latent_dim}")
+        print(f"  • Hidden dimensions: {self.hidden_dims}")
+        print(f"  • Beta (β): {self.beta}")
+        print(f"  • Gamma (γ): {self.gamma}")
+        print(f"  • Use MidiHum features: {self.use_midihum}")
+        print(f"  • Learning rate: {self.learning_rate}")
+        print(f"  • Device: {self.device}")
+        print(f"  • Trained: {self.trained}")
+        print()
+        
+        # Scalers info
+        print("Data Preprocessing:")
+        print(f"  • Context scaler: {type(self.context_scaler).__name__}")
+        print(f"  • Target scaler: {type(self.target_scaler).__name__}")
+        print(f"  • Feature scaler: {type(self.feature_scaler).__name__ if self.feature_scaler else 'None'}")
+        print()
+        
+        # Call the underlying model's summary using API
+        print("Underlying β-VAE Model Architecture:")
+        print("-" * 40)
+        self.model.model_summary()
+        
+        # Training info
+        if hasattr(self, 'optimizer') and self.optimizer is not None:
+            print("Training Setup:")
+            print(f"  • Optimizer: {type(self.optimizer).__name__}")
+            print(f"  • Learning rate: {self.learning_rate}")
+            if hasattr(self, 'scheduler') and self.scheduler is not None:
+                print(f"  • Scheduler: {type(self.scheduler).__name__}")
+            print()
+        
+        print("=" * 80) 

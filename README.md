@@ -30,6 +30,14 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Start the env with uv
+
+```
+uv sync
+
+source .venv/bin/activate
+```
+
 ### Training Models
 
 ```bash

@@ -759,7 +759,6 @@ class FeatureExtractor:
             avg_tempo = 60 / np.mean(perf_params['beat_period'])
             # Scale factor to convert to 120 BPM
             scale = avg_tempo / 120
-            print(f"avg_tempo: {avg_tempo}")
             
             # Scale beat period and timing
             perf_params['beat_period'] = perf_params['beat_period'] * scale

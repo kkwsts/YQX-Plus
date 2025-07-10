@@ -7,7 +7,7 @@ This system learns to predict expressive performance parameters (timing, dynamic
 from musical score context using a Bayesian model trained on human performances.
 """
 
-import os, time
+import os, time, glob, pickle
 import numpy as np
 import pandas as pd
 from typing import List, Tuple, Dict, Optional
@@ -18,11 +18,13 @@ import hook
 import warnings
 from omegaconf import OmegaConf, DictConfig
 import torch
+import wandb
+from torchinfo import summary
 warnings.filterwarnings('ignore')
 
 from expressivenote import ExpressiveNote  
 from gmm import BayesianExpressiveModel
-from flow_JASCO import FMExpressiveModel
+from bvae import BVAEExpressiveModel
 from features import FeatureExtractor
 
 
@@ -90,13 +92,28 @@ class YQXSystem:
         self.musicxml_dir = os.path.join(self.data_dir, "musicxml")
         self.match_dir = os.path.join(self.data_dir, "match")
         
+        self.use_vienna4x22 = config.data.use_vienna4x22
         self.asap_dir = config.data.asap_dir if config.data.use_asap else None
         if self.asap_dir is not None:
             self.asap_split_csv = os.path.join(self.asap_dir, "metadata-v1.3.csv")
         
+        self.atepp_dir = config.data.atepp_dir if config.data.use_atepp else None
+        if self.atepp_dir is not None:
+            self.atepp_meta_csv = config.data.atepp_meta_csv
+        
         # Initialize components
         self.feature_extractor = FeatureExtractor()
         
+        self.context_features, self.targets = self.load_data()
+
+        device = config.model.get('device', 'cpu')
+        if device.startswith('cuda:'):
+            # Check if specified GPU is available
+            gpu_id = int(device.split(':')[1])
+            if gpu_id >= torch.cuda.device_count():
+                print(f"Warning: GPU {gpu_id} not available, using CPU instead")
+                device = "cpu"
+
         # Initialize model based on config
         if config.model.type == "gmm":
             gmm_config = config.model.gmm
@@ -105,18 +122,11 @@ class YQXSystem:
                 random_state=gmm_config.get('random_state', 42)
             )
         elif config.model.type == "flow":
+            from flow_JASCO import FMExpressiveModel
             flow_config = config.model.flow
-            device = config.model.get('device', 'cpu')
-            if device.startswith('cuda:'):
-                # Check if specified GPU is available
-                gpu_id = int(device.split(':')[1])
-                if gpu_id >= torch.cuda.device_count():
-                    print(f"Warning: GPU {gpu_id} not available, using CPU instead")
-                    device = "cpu"
-            
             self.model = FMExpressiveModel(
-                features_dim=flow_config.get('context_dim', 9),
-                expression_dim=flow_config.get('expression_dim', 4),  # Keep as expression_dim for backward compatibility
+                features_dim=self.context_features.shape[1],
+                target_dim=self.targets.shape[1], 
                 hidden_dim=flow_config.get('hidden_dim', 128),
                 use_midihum=config.model.use_midihum_features,
                 flow_matcher_type=flow_config.get('flow_matcher_type', 'standard'),
@@ -125,19 +135,21 @@ class YQXSystem:
             )
         elif config.model.type == "bvae":
             bvae_config = config.model.bvae
-            from bvae import BVAEExpressiveModel
             self.model = BVAEExpressiveModel(
-                context_dim=bvae_config.get('context_dim', 9),
-                target_dim=bvae_config.get('target_dim', 4),
+                context_dim= self.context_features.shape[1],
+                target_dim= self.targets.shape[1],
                 latent_dim=bvae_config.get('latent_dim', 64),
                 hidden_dims=bvae_config.get('hidden_dims', [256, 128]),
                 beta=bvae_config.get('beta', 4.0),
                 gamma=bvae_config.get('gamma', 1000.0),
                 use_midihum=config.model.use_midihum_features,
-                learning_rate=bvae_config.get('learning_rate', 0.001)
+                learning_rate=bvae_config.get('learning_rate', 0.001),
+                device= device
             )
+            
         else:
             raise ValueError(f"Unknown model type: {config.model.type}")
+        
         
         # Generate model path for experiment tracking
         self.model_path = self._generate_model_path(config)
@@ -146,8 +158,8 @@ class YQXSystem:
         os.makedirs(config.output.artifacts_dir, exist_ok=True)
         os.makedirs(config.output.ckpt_dir, exist_ok=True)
         
-    def _generate_model_path(self, config: DictConfig) -> str:
-        """Generate a descriptive model path for experiment tracking"""
+    def _generate_model_identifier(self, config: DictConfig) -> str:
+        """Generate a consistent model identifier for experiment tracking"""
         parts = []
         
         # Add experiment name if provided
@@ -167,17 +179,27 @@ class YQXSystem:
                     parts.append(f"fmt{config.model.flow.flow_matcher_type}")
             elif config.model.type == "bvae":
                 parts.append(f"ld{config.model.bvae.get('latent_dim', 64)}")
+                parts.append(f"hd{config.model.bvae.get('hidden_dims', [256, 128])}")
                 parts.append(f"b{config.model.bvae.get('beta', 4.0)}")
-                if config.model.bvae.get('gamma', 1000.0) != 1000.0:
-                    parts.append(f"g{config.model.bvae.gamma}")
+                parts.append(f"g{config.model.bvae.get('gamma', 10.0)}")
         
         # Add midihum features flag
         if config.model.use_midihum_features:
             parts.append("midihum")
         
-        # Combine parts
-        filename = "_".join(parts) + ".pkl"
+        return "_".join(parts)
+    
+    def _generate_model_path(self, config: DictConfig) -> str:
+        """Generate model file path"""
+        identifier = self._generate_model_identifier(config)
+        # Use configurable extension, default to .pkl for backward compatibility
+        extension = config.output.get('model_extension', '.pkl')
+        if not extension.startswith('.'):
+            extension = '.' + extension
+        filename = identifier + extension
         return os.path.join(config.output.ckpt_dir, filename)
+
+
 
     def get_asap_aligned_note_arrays(self, split='train', split_csv_path=None):
         """Load ASAP aligned note arrays with encoded performance parameters
@@ -190,6 +212,15 @@ class YQXSystem:
             print("ASAP directory not provided")
             return []
         
+        cache_file = os.path.join(self.config.output.artifacts_dir, f"asap_{split}_cache.pkl")
+        if os.path.exists(cache_file):
+            print(f"Loading ASAP {split} data from cache...")
+            with open(cache_file, 'rb') as f:
+                note_array_pairs = pickle.load(f)
+            print(f"Loaded {len(note_array_pairs)} ASAP score-performance pairs from cache")
+            return note_array_pairs
+        
+        print(f"Computing ASAP {split} data (will be cached for future use)...")
         note_array_pairs = []
         
         # Load split information if provided
@@ -277,6 +308,10 @@ class YQXSystem:
             if len(matched_snote_array) > 0 and len(parameters) > 0:
                 note_array_pairs.append((matched_snote_array, parameters))
             
+        with open(cache_file, 'wb') as f:
+            pickle.dump(note_array_pairs, f)
+        print(f"Saved {len(note_array_pairs)} ASAP score-performance pairs to cache")
+        
         print(f"Loaded {len(note_array_pairs)} ASAP score-performance pairs for {split}")
         return note_array_pairs
     
@@ -320,20 +355,128 @@ class YQXSystem:
         
         return note_array_pairs
 
+    def get_atepp_aligned_note_arrays(self, split='train', split_csv_path=None):
+        """Load ATEPP aligned note arrays with encoded performance parameters
+        
+        Args:
+            split: 'train' or 'test'
+            split_csv_path: Path to CSV file containing split information (optional)
+        """
+        if self.atepp_dir is None:
+            print("ATEPP directory not provided")
+            return []
+        
+        cache_file = os.path.join(self.config.output.artifacts_dir, f"atepp_{split}_cache.pkl")
+        if os.path.exists(cache_file):
+            print(f"Loading ATEPP {split} data from cache...")
+            with open(cache_file, 'rb') as f:
+                note_array_pairs = pickle.load(f)
+            print(f"Loaded {len(note_array_pairs)} ATEPP score-performance pairs from cache")
+            return note_array_pairs
+        
+        print(f"Computing ATEPP {split} data (will be cached for future use)...")
+        note_array_pairs = []
+        
+        # Find all alignment files (ending with 'n.csv')
+        alignment_paths = glob.glob(os.path.join(self.atepp_dir, "**/[!z]*n.csv"), recursive=True)
+        alignment_paths = sorted(alignment_paths)
+        
+        # For each alignment file, find corresponding performance and score files
+        for a_path in tqdm(alignment_paths, desc=f"Loading ATEPP {split} data"):
+            try:
+                # Construct performance path by changing extension
+                p_path = a_path[:-10] + ".mid"  # Remove "_align_n.csv" and add ".mid"
+                
+                # Find score file (with .*l extension - .xml, .musicxml, .krn, etc.)
+                score_dir = "/".join(p_path.split("/")[:-1])
+                score_files = glob.glob(os.path.join(score_dir, "*.*l"))
+                
+                if not score_files:
+                    continue
+                s_path = score_files[0]  # Take the first match
+                
+                # Check if all required files exist
+                if not (os.path.exists(s_path) and os.path.exists(a_path) and os.path.exists(p_path)):
+                    continue
+                
+                # Load alignment and check quality
+                alignment = pt.io.importparangonada.load_parangonada_alignment(a_path)
+                
+                # Filter out poor quality alignments
+                match_aligns = [a for a in alignment if a['label'] == 'match']
+                insertion_aligns = [a for a in alignment if a['label'] == 'insertion']
+                deletion_aligns = [a for a in alignment if a['label'] == 'deletion']
+                
+                total_aligns = len(match_aligns) + len(insertion_aligns) + len(deletion_aligns)
+                if total_aligns == 0 or (len(match_aligns) / total_aligns) < 0.5:
+                    continue
+                
+                # Load score with force_note_ids='keep' for ATEPP
+                score = pt.load_musicxml(s_path, force_note_ids='keep')
+                
+                # Check if score needs unfolding (based on alignment IDs)
+                if (len(alignment) > 0 and 'score_id' in alignment[0] 
+                    and "-" in str(alignment[0]['score_id'])
+                    and "-" not in str(score.note_array()['id'][0])):
+                    # Unfold the score if needed
+                    score = pt.score.unfold_part_maximal(pt.score.merge_parts(score.parts)) 
+                
+                # Load performance
+                performance = pt.load_performance(p_path)
+                
+                # Encode performance parameters
+                parameters, snote_ids = pt.musicanalysis.encode_performance(
+                    score, performance, alignment
+                )
+                
+                # Filter out invalid tempo (following original script's filter)
+                avg_tempo = 60 / parameters['beat_period'].mean()
+                if avg_tempo > 200:  # Skip if tempo is too fast
+                    continue
+                
+                # Get score note array and filter to matched notes
+                snote_array = score.note_array()
+                matched_snote_array = snote_array[np.isin(snote_array['id'], snote_ids)]
+                
+                if len(matched_snote_array) > 0 and len(parameters) > 0:
+                    note_array_pairs.append((matched_snote_array, parameters))
+            except Exception as e:
+                print(f"Error processing ATEPP file {a_path}: {e}")
+                continue
+        
+        # Save to cache
+        with open(cache_file, 'wb') as f:
+            pickle.dump(note_array_pairs, f)
+        print(f"Saved {len(note_array_pairs)} ATEPP score-performance pairs to cache")
+        
+        print(f"Loaded {len(note_array_pairs)} ATEPP score-performance pairs for {split}")
+        return note_array_pairs
 
-    
-    def train(self):
-        """Train the YQX system"""
+
+    def load_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        
         print("Loading training data...")
-        note_pairs = self.get_v422_aligned_note_arrays('train')
-        if self.asap_dir is not None:
+        note_pairs = [] 
+        if self.use_vienna4x22: # default, most time will use 
+            note_pairs = self.get_v422_aligned_note_arrays('train')
+        elif self.asap_dir is not None:
             print("Loading ASAP training data...")
             note_pairs.extend(self.get_asap_aligned_note_arrays('train', self.asap_split_csv))
+        if self.atepp_dir is not None:
+            print("Loading ATEPP training data...")
+            note_pairs.extend(self.get_atepp_aligned_note_arrays('train', self.atepp_meta_csv))
         print(f"Loaded {len(note_pairs)} score-performance pairs")
+
+        # Log dataset info
+        # wandb.log({"dataset_size": len(note_pairs)})
         
         print("Extracting features for training data...")
         training_notes, avg_tempos = [], []
         for idx, (score_notes, perf_params) in tqdm(enumerate(note_pairs)):
+            
+            if not self.config.train.enabled and idx == 1:
+                print("Skipping further data loading for training, only using first piece")
+                break
             
             # filter out outliers and standardize the time parameters to 120 bpm
             score_notes, perf_params, avg_tempo = self.feature_extractor.standardize_targets(score_notes, perf_params)
@@ -372,20 +515,29 @@ class YQXSystem:
                                  note.velocity is not None and
                                  note.articulation_log is not None]
         
-        # Extract features
         context_features = self.feature_extractor.encode_features(
             training_notes_filtered, 
             fit=True, 
             use_midihum=self.config.model.use_midihum_features
         )
         
-        # Prepare targets
         targets = np.array([[
             note.beat_period,
             note.timing,
-            note.velocity / 127.0,  # Normalize velocity
+            note.velocity,
             note.articulation_log
         ] for note in training_notes_filtered])
+        
+        return context_features, targets
+    
+    def train(self):
+        """Train the YQX system"""
+        # Initialize wandb
+        wandb.init(
+            project="yqx-expressive-performance",
+            config=dict(self.config),
+            name=self._generate_model_identifier(self.config)
+        )
         
         # Train model (model-agnostic interface)
         train_kwargs = {}
@@ -398,13 +550,15 @@ class YQXSystem:
             train_kwargs['epochs'] = flow_config.get('epochs', 100)
             train_kwargs['batch_size'] = flow_config.get('batch_size', 32)
         
-        self.model.train(context_features, targets, **train_kwargs)
+        self.model.train(self.context_features, self.targets, **train_kwargs)
         
-        self.model.train_model(training_notes, self.feature_extractor)
         print(f"Training time: {time.time() - t0} seconds")
         
         # Save model and encoders
         self.save_model()
+        
+        # Finish wandb run
+        wandb.finish()
     
     def render_performance(self, musicxml_path: str = None, output_midi: str = None, initial_tempo: int = None):
         """Render expressive performance of a MusicXML score"""
@@ -548,19 +702,8 @@ class YQXSystem:
         
         # Create organized output directory
         if output_subdir is None:
-            # Generate subdir name from model info
-            model_info = []
-            model_info.append(self.config.model.type)
-            if self.config.model.type == "gmm":
-                model_info.append(f"nc{self.config.model.gmm.n_components}")
-            elif self.config.model.type == "flow":
-                model_info.append(f"hd{self.config.model.flow.get('hidden_dim', 128)}")
-            elif self.config.model.type == "bvae":
-                model_info.append(f"ld{self.config.model.bvae.get('latent_dim', 64)}")
-                model_info.append(f"b{self.config.model.bvae.get('beta', 4.0)}")
-            if self.config.model.use_midihum_features:
-                model_info.append("midihum")
-            output_subdir = "_".join(model_info)
+            # Generate subdir name from model identifier
+            output_subdir = self._generate_model_identifier(self.config)
         
         test_output_dir = os.path.join(self.config.output.output_dir, output_subdir)
         os.makedirs(test_output_dir, exist_ok=True)
