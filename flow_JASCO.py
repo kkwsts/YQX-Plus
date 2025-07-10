@@ -6,6 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from typing import List, Dict
 import math
 import typing as tp
+import wandb
 from expressivenote import *
 
 from torchdiffeq import odeint
@@ -36,7 +37,7 @@ class ConditionalFlowMatcher:
     def compute_mu_t(self, x0, x1, t):
         """Mean of the flow path"""
         t = self._pad_t_like_x(t, x0)
-        return t * x1 + (1 - t) * x0
+        return t * x1 + (1 - t) * x0 # linear interpolation
 
     def compute_sigma_t(self, t):
         """Variance of the flow path"""
@@ -345,10 +346,10 @@ class MusicalConditioningSystem(nn.Module):
 class VectorFieldNetwork(nn.Module):
     """Enhanced vector field network"""
     
-    def __init__(self, features_dim: int, expression_dim: int, hidden_dim: int = 128, use_midihum: bool = False):
+    def __init__(self, features_dim: int, target_dim: int, hidden_dim: int = 128, use_midihum: bool = False):
         super().__init__()
         self.features_dim = features_dim 
-        self.expression_dim = expression_dim
+        self.target_dim = target_dim
         self.hidden_dim = hidden_dim
         self.use_midihum = use_midihum
         
@@ -362,25 +363,25 @@ class VectorFieldNetwork(nn.Module):
         self.time_embedding = TimeEmbedding(hidden_dim)
         
         self.main_network = nn.Sequential(
-            nn.Linear(expression_dim + hidden_dim + hidden_dim, hidden_dim * 2),
+            nn.Linear(target_dim + hidden_dim + hidden_dim, hidden_dim * 2),
             nn.SiLU(),
             nn.Linear(hidden_dim * 2, hidden_dim * 2),
             nn.SiLU(),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, expression_dim)
+            nn.Linear(hidden_dim, target_dim)
         )
         
-        self.expression_proj = nn.Linear(expression_dim, expression_dim)
+        self.expression_proj = nn.Linear(target_dim, target_dim)
 
     def forward(self, t: torch.Tensor, x: torch.Tensor, features: torch.Tensor):
         """
         Args:
             t: Time parameter [batch_size] or [batch_size, 1]
-            x: Current expression state [batch_size, expression_dim]
+            x: Current expression state [batch_size, target_dim]
             features: Musical features [batch_size, features_dim]
         Returns:
-            Vector field [batch_size, expression_dim]
+            Vector field [batch_size, target_dim]
         """
         batch_size = x.shape[0]
         
@@ -408,7 +409,7 @@ class VectorFieldNetwork(nn.Module):
 class FMExpressiveModel(StreamingModule):
     """Enhanced Flow Matching model for expressive music performance with AudioCraft integration"""
     
-    def __init__(self, features_dim: int = None, expression_dim: int = 4, hidden_dim: int = 128, 
+    def __init__(self, features_dim: int = None, target_dim: int = 4, hidden_dim: int = 128, 
                  use_midihum: bool = False, flow_matcher_type: str = "standard", sigma: float = 0.01, device: str = "cpu"):
         super().__init__()
         
@@ -421,14 +422,14 @@ class FMExpressiveModel(StreamingModule):
         else:
             self.features_dim = features_dim
         
-        self.expression_dim = expression_dim
+        self.target_dim = target_dim
         self.hidden_dim = hidden_dim
         self.use_midihum = use_midihum
         
         self.device = torch.device(device)
         
         print(f"Initializing FMExpressiveModel with features_dim={self.features_dim}, "
-              f"expression_dim={expression_dim}, use_midihum={use_midihum}, device={self.device}")
+              f"target_dim={target_dim}, use_midihum={use_midihum}, device={self.device}")
         
         try:
             self.flow_matcher = ConditionalFlowMatcher(
@@ -443,12 +444,10 @@ class FMExpressiveModel(StreamingModule):
         
         self.vector_field_network = VectorFieldNetwork(
             features_dim=self.features_dim,
-            expression_dim=expression_dim,
+            target_dim=target_dim,
             hidden_dim=hidden_dim,
             use_midihum=use_midihum
         )
-        
-
         
         # Training state
         self.scaler = None
@@ -478,7 +477,7 @@ class FMExpressiveModel(StreamingModule):
         """        
         Args:
             features: Musical features [batch_size, features_dim]
-            target: Target expression parameters [batch_size, expression_dim]
+            target: Target expression parameters [batch_size, target_dim]
         
         Returns:
             Loss value
@@ -533,7 +532,7 @@ class FMExpressiveModel(StreamingModule):
                 
             targets = np.array(targets)
             
-            # Handle dimension mismatch
+            # Handle dimension mismatch ????
             min_len = min(len(contexts), len(targets))
             contexts = contexts[:min_len]
             targets = targets[:min_len]
@@ -616,6 +615,13 @@ class FMExpressiveModel(StreamingModule):
                 print(f"Early stopping at epoch {epoch}")
                 break
             
+            # Log to wandb
+            wandb.log({
+                "epoch": epoch,
+                "flow_loss": avg_loss,
+                "learning_rate": lr
+            })
+            
             # Print progress
             if epoch % 100 == 0:
                 lr = optimizer.param_groups[0]['lr']
@@ -636,7 +642,7 @@ class FMExpressiveModel(StreamingModule):
             ode_atol: Absolute tolerance for adaptive ODE solver
             
         Returns:
-            Generated expression parameters [batch_size, expression_dim]
+            Generated expression parameters [batch_size, target_dim]
         """
         self.eval()
         
@@ -645,7 +651,7 @@ class FMExpressiveModel(StreamingModule):
             batch_size = features.shape[0]
             
             # Start from noise
-            x_0 = self._to_device(torch.randn(batch_size, self.expression_dim))
+            x_0 = self._to_device(torch.randn(batch_size, self.target_dim))
             
             # Check if using adaptive ODE solver
             if method in ["odeint", "dopri5"]:
@@ -688,14 +694,14 @@ class FMExpressiveModel(StreamingModule):
                            ode_rtol: float, ode_atol: float, method: str) -> torch.Tensor:
         """        
         Args:
-            x_0: Initial noise [batch_size, expression_dim]
+            x_0: Initial noise [batch_size, target_dim]
             features: Musical features [batch_size, features_dim]
             ode_rtol: Relative tolerance
             ode_atol: Absolute tolerance  
             method: ODE solver method
             
         Returns:
-            Generated expression parameters [batch_size, expression_dim]
+            Generated expression parameters [batch_size, target_dim]
         """
         def ode_func(t, x):
             """
@@ -703,9 +709,9 @@ class FMExpressiveModel(StreamingModule):
             
             Args:
                 t: scalar time (single value for all batch elements)
-                x: state [batch_size, expression_dim]
+                x: state [batch_size, target_dim]
             Returns:
-                dx/dt: vector field [batch_size, expression_dim]
+                dx/dt: vector field [batch_size, target_dim]
             """
             # Expand time to batch size if needed
             if t.dim() == 0:
@@ -819,7 +825,7 @@ class FMExpressiveModel(StreamingModule):
         save_dict = {
             'model_state_dict': self.state_dict(),
             'features_dim': self.features_dim,  
-            'expression_dim': self.expression_dim,
+            'target_dim': self.target_dim,
             'hidden_dim': self.hidden_dim,
             'use_midihum': self.use_midihum,
             'device': str(self.device),
@@ -842,8 +848,8 @@ class FMExpressiveModel(StreamingModule):
             self.features_dim = checkpoint['actual_context_dim']
             print(f"Loaded model with legacy context_dim={self.features_dim}, now using features_dim")
         
-        if 'expression_dim' in checkpoint:
-            self.expression_dim = checkpoint['expression_dim']
+        if 'target_dim' in checkpoint:
+            self.target_dim = checkpoint['target_dim']
         if 'hidden_dim' in checkpoint:
             self.hidden_dim = checkpoint['hidden_dim']
         if 'use_midihum' in checkpoint:
@@ -878,7 +884,7 @@ class FMExpressiveModel(StreamingModule):
         """Enhanced testing with AudioCraft features"""
         print("Testing enhanced FMExpressiveModel...")
         print(f"Features dimension: {self.features_dim}")
-        print(f"Expression dimension: {self.expression_dim}")
+        print(f"Expression dimension: {self.target_dim}")
         print(f"Use midihum: {self.use_midihum}")
         
         # Test conditioning system
@@ -908,7 +914,7 @@ class FMExpressiveModel(StreamingModule):
         try:
             batch_size = 4
             features = self._to_device(torch.randn(batch_size, self.features_dim))
-            target = self._to_device(torch.randn(batch_size, self.expression_dim))
+            target = self._to_device(torch.randn(batch_size, self.target_dim))
             
             # Test loss computation
             loss = self.flow_matching_loss(features, target)
