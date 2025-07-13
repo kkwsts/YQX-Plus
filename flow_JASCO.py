@@ -143,7 +143,7 @@ class VectorFieldNetwork(nn.Module):
             
         self.time_embedding = TimeEmbedding(hidden_dim)
 
-        self.input_embedding = nn.Linear(expression_dim + input_features_dim, hidden_dim, bias=False)
+        self.input_embedding = nn.Linear(target_dim + input_features_dim, hidden_dim, bias=False)
         
         try:
             self.transformer = UnetTransformer(
@@ -174,7 +174,7 @@ class VectorFieldNetwork(nn.Module):
             self.uses_audiocraft = False
             
         self.out_norm = create_norm_fn('layer_norm', hidden_dim)
-        self.output_projection = nn.Linear(hidden_dim, expression_dim, bias=True)
+        self.output_projection = nn.Linear(hidden_dim, target_dim, bias=True)
         
         self._init_weights()
         
@@ -207,7 +207,7 @@ class VectorFieldNetwork(nn.Module):
         time_embedded = self.time_embedding(t)  # [B, hidden_dim]
         
         # Combine expression state and features
-        combined_input = torch.cat([x, features], dim=1)  # [B, expression_dim + features_dim]
+        combined_input = torch.cat([x, features], dim=1)  # [B, target_dim + features_dim]
         
         # Input embedding
         embedded = self.input_embedding(combined_input)  # [B, hidden_dim]
@@ -230,7 +230,7 @@ class VectorFieldNetwork(nn.Module):
         
         # Output normalization and projection
         normalized = self.out_norm(transformer_output)
-        vector_field = self.output_projection(normalized)  # [B, expression_dim]
+        vector_field = self.output_projection(normalized)  # [B, target_dim]
         
         return vector_field
 
@@ -330,7 +330,7 @@ class FMExpressiveModel(StreamingModule):
         
         return loss
 
-    def train_model(self, training_notes: List[List[ExpressiveNote]], feature_extractor, epochs: int = 1000, batch_size: int = 32):
+    def train(self, training_notes: List[List[ExpressiveNote]], feature_extractor, epochs: int = 1000, batch_size: int = 32):
         print("Extracting features and targets...")
         
         all_contexts = []
