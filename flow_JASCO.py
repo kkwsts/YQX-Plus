@@ -136,14 +136,9 @@ class VectorFieldNetwork(nn.Module):
         self.num_heads = num_heads
         self.num_layers = num_layers
         
-        if use_midihum:
-            input_features_dim = 6 + 171  
-        else:
-            input_features_dim = 9 
-            
         self.time_embedding = TimeEmbedding(hidden_dim)
 
-        self.input_embedding = nn.Linear(expression_dim + input_features_dim, hidden_dim, bias=False)
+        self.input_embedding = nn.Linear(target_dim + features_dim, hidden_dim, bias=False)
         
         try:
             self.transformer = UnetTransformer(
@@ -174,7 +169,7 @@ class VectorFieldNetwork(nn.Module):
             self.uses_audiocraft = False
             
         self.out_norm = create_norm_fn('layer_norm', hidden_dim)
-        self.output_projection = nn.Linear(hidden_dim, expression_dim, bias=True)
+        self.output_projection = nn.Linear(hidden_dim, target_dim, bias=True)
         
         self._init_weights()
         
@@ -238,17 +233,22 @@ class VectorFieldNetwork(nn.Module):
 
 class FMExpressiveModel(StreamingModule):
     
-    def __init__(self, features_dim: int = None, target_dim: int = 4, hidden_dim: int = 128, epochs: int = 1000,
-                 use_midihum: bool = False, flow_matcher_type: str = "standard", sigma: float = 0.01, 
-                 device: str = "cpu", num_heads: int = 4, num_layers: int = 2):
+    def __init__(self, 
+                 features_dim: int = None, 
+                 target_dim: int = 4, 
+                 hidden_dim: int = 128, 
+                 use_midihum: bool = False, 
+                 flow_matcher_type: str = "standard", 
+                 sigma: float = 0.01, 
+                 device: str = "cpu", 
+                 num_heads: int = 4, 
+                 num_layers: int = 2):
         super().__init__()
         
         self.features_dim = features_dim
-        
         self.target_dim = target_dim
         self.hidden_dim = hidden_dim
         self.use_midihum = use_midihum
-        self.epochs = epochs
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.flow_matcher_type = flow_matcher_type
@@ -330,50 +330,25 @@ class FMExpressiveModel(StreamingModule):
         
         return loss
 
-    def train_model(self, training_notes: List[List[ExpressiveNote]], feature_extractor, epochs: int = 1000, batch_size: int = 32):
-        print("Extracting features and targets...")
+    def train_model(self, context_features: np.ndarray, targets: np.ndarray, epochs: int = 1000, batch_size: int = 32):
+        """Train the flow matching model on pre-extracted features and targets"""
         
-        all_contexts = []
-        all_targets = []
+        print("Training flow matching model...")
+
+        # if len(context_features) != len(targets):
+        #     raise ValueError(f"Feature and target lengths don't match: {len(context_features)} vs {len(targets)}")
         
-        for note_sequence in training_notes:
-            if len(note_sequence) == 0:
-                continue
-                
-            # Extract context features
-            contexts = feature_extractor.encode_features(
-                note_sequence, fit=True, use_midihum=self.use_midihum
-            )
-            
-            # Extract targets
-            targets = []
-            for note in note_sequence:
-                target = note.get_targets()
-                if any(t is None for t in target):
-                    continue
-                targets.append(target)
-            
-            if len(targets) == 0:
-                continue
-                
-            targets = np.array(targets)
-            
-            # Handle dimension mismatch ????
-            min_len = min(len(contexts), len(targets))
-            contexts = contexts[:min_len]
-            targets = targets[:min_len]
-            
-            all_contexts.append(contexts)
-            all_targets.append(targets)
+        if context_features.shape[0] == 0:
+            raise ValueError("No training data provided")
         
-        if not all_contexts:
-            raise ValueError("No valid training data found")
+        if self.features_dim is None:
+            self.features_dim = context_features.shape[1]
+            print(f"Setting features_dim to {self.features_dim}")
         
-        X = np.vstack(all_contexts)
-        y = np.vstack(all_targets)
+        X = context_features.copy()
+        y = targets.copy()
         
-        print(f"Training data shape: X={X.shape}, y={y.shape}")
-        
+        # Initialize and fit scalers
         if self.scaler is None:
             self.scaler = StandardScaler()
             X = self.scaler.fit_transform(X)
@@ -396,7 +371,7 @@ class FMExpressiveModel(StreamingModule):
             shuffle=True,
             # num_workers=4, 
             # pin_memory=False, 
-            # drop_last=True
+            drop_last=True
         )
         
         optimizer = torch.optim.AdamW(
@@ -408,19 +383,18 @@ class FMExpressiveModel(StreamingModule):
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
         
-        
-        self.train_mode = True
+        super().train(mode=True)
         best_loss = float('inf')
-        patience = max(10, epochs // 10) 
+        patience = max(10, epochs // 10)
         patience_counter = 0
         
         for epoch in range(epochs):
             epoch_losses = []
             
-            for batch_features, batch_target in dataloader:
+            for batch_features, batch_targets in dataloader:
                 optimizer.zero_grad()
                 
-                loss = self.flow_matching_loss(batch_features, batch_target)
+                loss = self.flow_matching_loss(batch_features, batch_targets)
                 loss.backward()
                 
                 # Gradient clipping for stability
@@ -430,9 +404,14 @@ class FMExpressiveModel(StreamingModule):
                 epoch_losses.append(loss.item())
             
             avg_loss = np.mean(epoch_losses)
-            
-            if scheduler:
-                scheduler.step()
+            scheduler.step()
+
+            # Log to wandb
+            wandb.log({
+                "epoch": epoch ,
+                "fm_total_loss": loss.item(),
+                "learning_rate": self.scheduler.get_last_lr()[0]
+            })
             
             # Early stopping
             if avg_loss < best_loss:
@@ -445,11 +424,15 @@ class FMExpressiveModel(StreamingModule):
                 print(f"Early stopping at epoch {epoch}")
                 break
             
-            if (epoch + 1) % 50 == 0:
+            if (epoch + 1) % 10 == 0:
                 lr = optimizer.param_groups[0]['lr']
                 print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, LR: {lr:.2e}")
         
+        self.trained = True
         print(f"Training completed. Final loss: {best_loss:.6f}")
+
+    def train(self, context_features: np.ndarray, targets: np.ndarray, **kwargs):
+        return self.train_model(context_features, targets, **kwargs)
 
     def sample(self, features: torch.Tensor, n_steps: int = 50, method: str = "dopri5", 
                ode_rtol: float = 1e-5, ode_atol: float = 1e-5) -> torch.Tensor:
@@ -547,13 +530,15 @@ class FMExpressiveModel(StreamingModule):
         return trajectory[-1]
     
 
-    def predict(self, notes: List[ExpressiveNote], 
-                integration_method: str = "dopri5") -> List[ExpressiveNote]:
+    def predict(self, features: np.ndarray, integration_method: str = "dopri5") -> np.ndarray:
+        self.eval()
         
-        features_array = self.scaler.transform(notes)
-        features_tensor = torch.tensor(features_array, dtype=torch.float32, device=self.device)
+        if self.scaler is None:
+            raise ValueError("Model not trained - scaler not available")
         
-        # Generate predictions using enhanced sampling
+        features_scaled = self.scaler.transform(features)
+        features_tensor = torch.tensor(features_scaled, dtype=torch.float32, device=self.device)
+        
         with torch.no_grad():
             if integration_method in ["odeint", "dopri5"]:
                 # Use adaptive ODE solver with tighter tolerances for high quality
@@ -570,8 +555,11 @@ class FMExpressiveModel(StreamingModule):
                     method=integration_method
                 )
         
-    
-        predictions = predictions.numpy()
+        predictions = predictions.cpu().numpy()
+        
+        if self.target_scaler is None:
+            raise ValueError("Model not trained - target scaler not available")
+        
         predictions = self.target_scaler.inverse_transform(predictions)
         
         return predictions
@@ -636,61 +624,3 @@ class FMExpressiveModel(StreamingModule):
         except Exception as e:
             print(f"Error loading model state: {e}")
             print("This might be due to AudioCraft availability mismatch. Consider retraining.")
-
-    def test_with_features(self, feature_extractor):
-        """Enhanced testing with AudioCraft features"""
-        print("Testing enhanced FMExpressiveModel...")
-        print(f"Features dimension: {self.features_dim}")
-        print(f"Expression dimension: {self.target_dim}")
-        print(f"Use midihum: {self.use_midihum}")
-        
-        # Test conditioning system
-        if hasattr(self.vector_field_network, 'conditioning_system'):
-            conditioning = self.vector_field_network.conditioning_system
-            print("✓ Multi-modal conditioning system available")
-            print(f"  Basic features: {conditioning.basic_dim} dims")
-            if self.use_midihum:
-                print(f"  Midihum features: {conditioning.midihum_dim} dims")
-                print(f"  Total features: {conditioning.features_dim} dims")
-                
-                # Test individual encoders
-                for encoder_name in ['harmonic_encoder', 'statistical_encoder', 'technical_encoder', 'timing_encoder']:
-                    if hasattr(conditioning, encoder_name):
-                        print(f"{encoder_name} available")
-                    else:
-                        print(f"{encoder_name} missing")
-        
-        # Test time embedding
-        if hasattr(self.vector_field_network, 'time_embedding'):
-            print("✓ AudioCraft-style time embedding available")
-        
-        # Test flow matcher
-        print(f"✓ Flow matcher using {self.flow_matcher.schedule_type} schedule")
-        
-        # Test forward pass
-        try:
-            batch_size = 4
-            features = self._to_device(torch.randn(batch_size, self.features_dim))
-            target = self._to_device(torch.randn(batch_size, self.target_dim))
-            
-            # Test loss computation
-            loss = self.flow_matching_loss(features, target)
-            print(f"✓ Loss computation successful: {loss.item():.6f}")
-            
-            # Test sampling with different methods
-            test_methods = ["euler", "midpoint", "rk4", "odeint", "dopri5"]
-            
-            for method in test_methods:
-                try:
-                    if method in ["odeint", "dopri5"]:
-                        samples = self.sample(features, method=method, ode_rtol=1e-3, ode_atol=1e-3)
-                    else:
-                        samples = self.sample(features, n_steps=10, method=method)
-                    print(f"✓ Sampling with {method} method successful: {samples.shape}")
-                except Exception as e:
-                    print(f"✗ Sampling with {method} method failed: {e}")
-            
-        except Exception as e:
-            print(f"✗ Forward pass failed: {e}")
-        
-        print("Enhanced model testing complete!")
