@@ -633,6 +633,11 @@ class YQXSystem:
             train_kwargs['epochs'] = flow_config.get('epochs', 100)
             train_kwargs['batch_size'] = flow_config.get('batch_size', 32)
         
+        # filter out the data with nan in context_features 
+        nan_mask = np.isnan(self.context_features).any(axis=1)
+        self.context_features = self.context_features[~nan_mask]
+        self.targets = self.targets[~nan_mask]
+
         self.model.train(self.context_features, self.targets, **train_kwargs)
         
         print(f"Training time: {time.time() - t0} seconds")
