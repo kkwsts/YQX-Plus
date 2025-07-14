@@ -26,8 +26,10 @@ model:
     random_state: 42
     
   flow:
-    hidden_dim: 128
-    flow_matcher_type: "standard"
+    hidden_dim: 192
+    num_heads: 8
+    num_layers: 6
+    flow_matcher_type: "standard" # "optimal_transport"
     sigma: 0.01
     
   bvae:

@@ -129,6 +129,8 @@ class YQXSystem:
                 target_dim=self.targets.shape[1], 
                 hidden_dim=flow_config.get('hidden_dim', 128),
                 use_midihum=config.model.use_midihum_features,
+                num_heads=flow_config.get('num_heads', 4),
+                num_layers=flow_config.get('num_layers', 2),
                 flow_matcher_type=flow_config.get('flow_matcher_type', 'standard'),
                 sigma=flow_config.get('sigma', 0.01),
                 device=device
@@ -175,6 +177,8 @@ class YQXSystem:
                 parts.append(f"nc{config.model.gmm.n_components}")
             elif config.model.type == "flow":
                 parts.append(f"hd{config.model.flow.get('hidden_dim', 128)}")
+                parts.append(f"nh{config.model.flow.get('num_heads', 4)}")
+                parts.append(f"nl{config.model.flow.get('num_layers', 2)}")
                 if config.model.flow.get('flow_matcher_type', 'standard') != 'standard':
                     parts.append(f"fmt{config.model.flow.flow_matcher_type}")
             elif config.model.type == "bvae":
@@ -477,6 +481,11 @@ class YQXSystem:
             if not self.config.train.enabled and idx == 1:
                 print("Skipping further data loading for training, only using first piece")
                 break
+            
+            # to investigate later!
+            if score_notes.shape != perf_params.shape:
+                # print(f"Warning: Score notes and performance parameters have different shapes: {score_notes.shape} != {perf_params.shape}")
+                continue
             
             # filter out outliers and standardize the time parameters to 120 bpm
             score_notes, perf_params, avg_tempo = self.feature_extractor.standardize_targets(score_notes, perf_params)

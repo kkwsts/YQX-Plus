@@ -8,7 +8,7 @@ import math
 import typing as tp
 import wandb
 from expressivenote import *
-
+from torchinfo import summary
 from torchdiffeq import odeint
 import audiocraft
 from audiocraft.modules.streaming import StreamingModule
@@ -139,7 +139,6 @@ class VectorFieldNetwork(nn.Module):
         self.time_embedding = TimeEmbedding(hidden_dim)
 
         self.input_embedding = nn.Linear(target_dim + features_dim, hidden_dim, bias=False)
-        self.input_embedding = nn.Linear(target_dim + input_features_dim, hidden_dim, bias=False)
         
         try:
             self.transformer = UnetTransformer(
@@ -168,6 +167,10 @@ class VectorFieldNetwork(nn.Module):
                 num_layers=num_layers
             )
             self.uses_audiocraft = False
+            print("Failed to initialize AudioCraft transformer, using fallback")
+        
+        # summary
+        summary(self)
             
         self.out_norm = create_norm_fn('layer_norm', hidden_dim)
         self.output_projection = nn.Linear(hidden_dim, target_dim, bias=True)
@@ -331,7 +334,7 @@ class FMExpressiveModel(StreamingModule):
         
         return loss
 
-    def train_model(self, context_features: np.ndarray, targets: np.ndarray, epochs: int = 1000, batch_size: int = 32):
+    def train(self, context_features: np.ndarray, targets: np.ndarray, epochs: int = 1000, batch_size: int = 32):
         """Train the flow matching model on pre-extracted features and targets"""
         
         print("Training flow matching model...")
@@ -388,6 +391,7 @@ class FMExpressiveModel(StreamingModule):
         best_loss = float('inf')
         patience = max(10, epochs // 10)
         patience_counter = 0
+        global_step = 0
         
         for epoch in range(epochs):
             epoch_losses = []
@@ -403,15 +407,23 @@ class FMExpressiveModel(StreamingModule):
                 
                 optimizer.step()
                 epoch_losses.append(loss.item())
+                
+                # Log step-level metrics
+                wandb.log({
+                    "step": global_step,
+                    "step_loss": loss.item(),
+                    "learning_rate": scheduler.get_last_lr()[0]
+                })
+                global_step += 1
             
             avg_loss = np.mean(epoch_losses)
             scheduler.step()
 
-            # Log to wandb
+            # Log epoch-level metrics
             wandb.log({
-                "epoch": epoch ,
-                "fm_total_loss": loss.item(),
-                "learning_rate": self.scheduler.get_last_lr()[0]
+                "epoch": epoch,
+                "epoch_loss": avg_loss,
+                "learning_rate": scheduler.get_last_lr()[0]
             })
             
             # Early stopping
@@ -431,9 +443,6 @@ class FMExpressiveModel(StreamingModule):
         
         self.trained = True
         print(f"Training completed. Final loss: {best_loss:.6f}")
-
-    def train(self, context_features: np.ndarray, targets: np.ndarray, **kwargs):
-        return self.train_model(context_features, targets, **kwargs)
 
     def sample(self, features: torch.Tensor, n_steps: int = 50, method: str = "dopri5", 
                ode_rtol: float = 1e-5, ode_atol: float = 1e-5) -> torch.Tensor:
