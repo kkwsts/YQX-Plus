@@ -479,27 +479,29 @@ class YQXSystem:
         return note_array_pairs
 
 
-    def load_data(self) -> Tuple[np.ndarray, np.ndarray]:
-        
-        print("Loading training data...")
-        note_pairs = [] 
-        if self.use_vienna4x22: # default, most time will use 
-            note_pairs = self.get_v422_aligned_note_arrays('train')
-        elif self.asap_dir is not None:
-            print("Loading ASAP training data...")
-            note_pairs.extend(self.get_asap_aligned_note_arrays('train', self.asap_split_csv))
-        if self.atepp_dir is not None:
-            print("Loading ATEPP training data...")
-            note_pairs.extend(self.get_atepp_aligned_note_arrays('train', self.atepp_meta_csv))
-        print(f"Loaded {len(note_pairs)} score-performance pairs")
+    def get_dataset_features(self, note_pairs, dataset_name: str, 
+                                       use_midihum: bool = False):
+        """Save extracted features for individual datasets (V422, ASAP, or ATEPP)
+        Args:
+            note_pairs: List of (score_notes, perf_params) tuples
+            dataset_name: Name of the dataset ('v422', 'asap', 'atepp')
+            use_midihum: Whether to use midihum features
+        """
+        midihum_suffix = "_midihum" if use_midihum else ""
 
-        # Log dataset info
-        # wandb.log({"dataset_size": len(note_pairs)})
+        cache_file = os.path.join(self.config.output.artifacts_dir, 
+                                f"{dataset_name}_features{midihum_suffix}_cache.pkl")
         
-        print("Extracting features for training data...")
+        if os.path.exists(cache_file):
+            print(f"Loading {dataset_name} features, midihum: {use_midihum}, from cache...")
+            with open(cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+            print(f"Loaded {dataset_name} features shape: {cache_data['context_features'].shape}, targets shape: {cache_data['targets'].shape} from cache")
+            return cache_data['context_features'], cache_data['targets']
+
+        print(f"Extracting features for {dataset_name} dataset...")
         training_notes, avg_tempos = [], []
         for idx, (score_notes, perf_params) in tqdm(enumerate(note_pairs)):
-            
             if not self.config.train.enabled and idx == 1:
                 print("Skipping further data loading for training, only using first piece")
                 break
@@ -531,10 +533,7 @@ class YQXSystem:
             np.save(os.path.join(self.config.output.artifacts_dir, "targets_distribution.npy"), targets_distribution)
             np.save(os.path.join(self.config.output.artifacts_dir, "avg_tempos.npy"), np.array(avg_tempos))
         
-        # Train model
-        t0 = time.time()
-        
-        # Flatten all notes and extract features/targets (same for all models)
+        # Flatten all notes and extract features/targets
         all_notes = []
         for piece_notes in training_notes:
             all_notes.extend(piece_notes)
@@ -559,6 +558,59 @@ class YQXSystem:
             note.articulation_log
         ] for note in training_notes_filtered])
         
+        # Save to cache
+        cache_data = {
+            'context_features': context_features,
+            'targets': targets,
+            'use_midihum': use_midihum,
+            'dataset_name': dataset_name,
+            'feature_shape': context_features.shape,
+            'target_shape': targets.shape,
+            'avg_tempos': avg_tempos
+        }
+        
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache_data, f)
+        
+        print(f"Saved {dataset_name} features cache, midihum: {use_midihum}")
+        print(f"Features shape: {context_features.shape}, Targets shape: {targets.shape}")
+        return context_features, targets
+
+
+    def load_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        
+        use_midihum = self.config.model.use_midihum_features
+        
+        print("Loading training data...")
+        note_pairs = [] 
+        context_features = []
+        targets = []
+        if self.use_vienna4x22: # default, most time will use 
+            note_pairs = self.get_v422_aligned_note_arrays('train')
+            context_features_vienna, targets_vienna = self.get_dataset_features(note_pairs, 'v422', use_midihum)
+            context_features.append(context_features_vienna)
+            targets.append(targets_vienna)
+        elif self.asap_dir is not None:
+            print("Loading ASAP training data...")
+            note_pairs.extend(self.get_asap_aligned_note_arrays('train', self.asap_split_csv))
+            context_features_asap, targets_asap = self.get_dataset_features(note_pairs, 'asap', use_midihum)
+            context_features.append(context_features_asap)
+            targets.append(targets_asap)
+        if self.atepp_dir is not None:
+            print("Loading ATEPP training data...")
+            note_pairs.extend(self.get_atepp_aligned_note_arrays('train', self.atepp_meta_csv))
+            context_features_atepp, targets_atepp = self.get_dataset_features(note_pairs, 'atepp', use_midihum)
+            context_features.append(context_features_atepp)
+            targets.append(targets_atepp)
+        print(f"Loaded {len(note_pairs)} score-performance pairs")
+
+        # Log dataset info
+        # wandb.log({"dataset_size": len(note_pairs)})
+        
+        context_features = np.vstack(context_features)
+        targets = np.vstack(targets)
+        print(f"Total features shape: {context_features.shape}, Total targets shape: {targets.shape}")
+
         return context_features, targets
     
     def train(self):
