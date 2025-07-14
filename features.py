@@ -72,6 +72,13 @@ class FeatureExtractor:
         # Define base categorical features
         BASE_CATEGORICAL_FEATURES = [
             'rhythmic_context',
+            'rhythmic_pattern_3step',
+            'rhythmic_pattern_5step',
+            'interval_direction',
+            'interval_direction_2step',
+            'interval_direction_3step',
+            'melodic_contour_3step',
+            'melodic_contour_5step',
             'ir_label'
         ]
         
@@ -85,13 +92,52 @@ class FeatureExtractor:
         
         # Define base continuous features
         BASE_FEATURES = [
+            # Basic features
             'pitch',
             'onset_beat',
             'duration_beat',
-            'pitch_interval',
-            'duration_ratio',
-            'ir_closure',
-            'position_in_phrase'
+            
+            # Pitch features
+            'pitch_class',
+            'octave',
+            'pitch_interval_next',
+            'pitch_interval_prev',
+            'pitch_interval_2next',
+            'pitch_interval_2prev',
+            'pitch_interval_3next',
+            'pitch_interval_3prev',
+            'pitch_relative_to_voice_range',
+            'pitch_relative_to_piece_range',
+            
+            # Voice features
+            'voice_layer',
+            'voice_layer_relative',
+            'notes_above_count',
+            'notes_below_count',
+            'notes_above_avg_pitch',
+            'notes_below_avg_pitch',
+            'notes_above_max_pitch',
+            'notes_below_min_pitch',
+            'voice_density_at_onset',
+            'voice_density_ratio',
+            'interval_to_highest_voice',
+            'interval_to_lowest_voice',
+            'interval_to_voice_center',
+            
+            # Rhythmic features
+            'duration_ratio_next',
+            'duration_ratio_prev',
+            'beat_position_in_measure',
+            'beat_position_in_phrase',
+            'duration_relative_to_voice_avg',
+            'duration_relative_to_piece_avg',
+            'duration_rank_in_voice',
+            'duration_rank_in_piece',
+            
+            # Phrase features
+            'position_in_phrase',
+            'phrase_length',
+            'ir_closure'
         ]
         
         # Define midihum basic features
@@ -160,7 +206,7 @@ class FeatureExtractor:
             cont_features.extend([getattr(note, f) for f in BASE_FEATURES])
             
             if use_midihum:
-                cont_features.append([getattr(note, f) for f in MIDIHUM_BASIC_FEATURES])
+                cont_features.extend([getattr(note, f) for f in MIDIHUM_BASIC_FEATURES])
                 cont_features.append(float(note.follows_pause if note.follows_pause is not None else 0))
                 cont_features.append(note.num_played_notes_pressed)
                 cont_features.append(note.avg_pitch_pressed)
@@ -479,25 +525,72 @@ class FeatureExtractor:
             expressive_notes = []
             for _, row in merged.iterrows():
                 note = ExpressiveNote(
-                    # Original YQX features
+                    # Basic features
                     pitch=row['pitch'],
                     onset_beat=row['onset_beat'],
                     duration_beat=row['duration_beat'],
                     voice=row['voice'],
-                    pitch_interval=row['pitch_interval'],
-                    duration_ratio=row['duration_ratio'],
+                    
+                    # Pitch features
+                    pitch_class=row['pitch_class'],
+                    octave=row['octave'],
+                    pitch_interval_next=row['pitch_interval_next'],
+                    pitch_interval_prev=row['pitch_interval_prev'],
+                    pitch_interval_2next=row['pitch_interval_2next'],
+                    pitch_interval_2prev=row['pitch_interval_2prev'],
+                    pitch_interval_3next=row['pitch_interval_3next'],
+                    pitch_interval_3prev=row['pitch_interval_3prev'],
+                    interval_direction=row['interval_direction'],
+                    interval_direction_2step=row['interval_direction_2step'],
+                    interval_direction_3step=row['interval_direction_3step'],
+                    melodic_contour_3step=row['melodic_contour_3step'],
+                    melodic_contour_5step=row['melodic_contour_5step'],
+                    pitch_relative_to_voice_range=row['pitch_relative_to_voice_range'],
+                    pitch_relative_to_piece_range=row['pitch_relative_to_piece_range'],
+                    
+                    # Voice features
+                    voice_layer=row['voice_layer'],
+                    voice_layer_relative=row['voice_layer_relative'],
+                    notes_above_count=row['notes_above_count'],
+                    notes_below_count=row['notes_below_count'],
+                    notes_above_avg_pitch=row['notes_above_avg_pitch'],
+                    notes_below_avg_pitch=row['notes_below_avg_pitch'],
+                    notes_above_max_pitch=row['notes_above_max_pitch'],
+                    notes_below_min_pitch=row['notes_below_min_pitch'],
+                    voice_density_at_onset=row['voice_density_at_onset'],
+                    voice_density_ratio=row['voice_density_ratio'],
+                    interval_to_highest_voice=row['interval_to_highest_voice'],
+                    interval_to_lowest_voice=row['interval_to_lowest_voice'],
+                    interval_to_voice_center=row['interval_to_voice_center'],
+                    
+                    # Rhythmic features
+                    duration_ratio_next=row['duration_ratio_next'],
+                    duration_ratio_prev=row['duration_ratio_prev'],
                     rhythmic_context=row['rhythmic_context'],
+                    rhythmic_pattern_3step=row['rhythmic_pattern_3step'],
+                    rhythmic_pattern_5step=row['rhythmic_pattern_5step'],
+                    beat_position_in_measure=row['beat_position_in_measure'],
+                    beat_position_in_phrase=row['beat_position_in_phrase'],
+                    is_on_beat=row['is_on_beat'],
+                    is_on_downbeat=row['is_on_downbeat'],
+                    duration_relative_to_voice_avg=row['duration_relative_to_voice_avg'],
+                    duration_relative_to_piece_avg=row['duration_relative_to_piece_avg'],
+                    duration_rank_in_voice=row['duration_rank_in_voice'],
+                    duration_rank_in_piece=row['duration_rank_in_piece'],
+                    
+                    # Phrase features
+                    position_in_phrase=row['position_in_phrase'],
+                    phrase_length=row['phrase_length'],
                     ir_label=row['ir_label'],
                     ir_closure=row['ir_closure'],
-                    position_in_phrase=row['position_in_phrase'],
+                    
+                    # Expressive targets
                     beat_period=row['beat_period'],
                     timing=row['timing'],
                     velocity=row['velocity'],
                     articulation_log=row['articulation_log'],
                     
                     # Basic midihum features
-                    pitch_class=row['pitch_class'],
-                    octave=row['octave'],
                     follows_pause=bool(row['follows_pause']),
                     
                     # Chord context features
