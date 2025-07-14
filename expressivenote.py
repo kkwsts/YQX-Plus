@@ -1,23 +1,110 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 @dataclass
 class ExpressiveNote:
     """Container for a note with its context features and expressive targets"""
-    # Score features
+    
+    #########################################################
+    ##### BASIC SCORE FEATURES ##############################
+    #########################################################
     pitch: int
     onset_beat: float
     duration_beat: float
     voice: int
     
-    # Context features
-    pitch_interval: int  # semitones to next note
-    duration_ratio: float  # duration ratio to next note
-    rhythmic_context: str  # e.g., "s-s-l" (short-short-long)
-    ir_label: str  # Implication-Realization label
-    ir_closure: float  # Musical closure measure
-    position_in_phrase: float  # 0.0 to 1.0
+    #########################################################
+    ##### PITCH FEATURES ####################################
+    #########################################################
+    # Basic pitch features
+    pitch_class: Optional[int] = None  # 0-11 pitch class
+    octave: Optional[int] = None  # Octave number
     
+    # Interval transitions (enhanced)
+    pitch_interval_next: Optional[int] = None  # semitones to next note (original)
+    pitch_interval_prev: Optional[int] = None  # semitones from previous note
+    
+    # Multi-step interval context
+    pitch_interval_2next: Optional[int] = None  # semitones to note after next
+    pitch_interval_2prev: Optional[int] = None  # semitones from note before previous
+    pitch_interval_3next: Optional[int] = None  # semitones to note 3 steps ahead
+    pitch_interval_3prev: Optional[int] = None  # semitones from note 3 steps back
+    
+    # Interval direction patterns
+    interval_direction: Optional[str] = None  # "up", "down", "same"
+    interval_direction_2step: Optional[str] = None  # 2-step pattern
+    interval_direction_3step: Optional[str] = None  # 3-step pattern
+    
+    # Melodic contour features
+    melodic_contour_3step: Optional[str] = None  # e.g., "up-up", "up-down", "down-up"
+    melodic_contour_5step: Optional[str] = None  # 5-step contour pattern
+    
+    # Pitch range context
+    pitch_relative_to_voice_range: Optional[float] = None  # 0-1, position in voice's pitch range
+    pitch_relative_to_piece_range: Optional[float] = None  # 0-1, position in piece's pitch range
+    
+    #########################################################
+    ##### VOICE FEATURES ####################################
+    #########################################################
+    # Voice layer information
+    voice_layer: Optional[int] = None  # Which layer (0=lowest, 1=middle, 2=highest)
+    voice_layer_relative: Optional[float] = None  # 0-1, relative position in voice layers
+    
+    # Notes above/below context
+    notes_above_count: Optional[int] = None  # Number of notes above this note at onset
+    notes_below_count: Optional[int] = None  # Number of notes below this note at onset
+    notes_above_avg_pitch: Optional[float] = None  # Average pitch of notes above
+    notes_below_avg_pitch: Optional[float] = None  # Average pitch of notes below
+    notes_above_max_pitch: Optional[float] = None  # Highest pitch above
+    notes_below_min_pitch: Optional[float] = None  # Lowest pitch below
+    
+    # Voice density
+    voice_density_at_onset: Optional[float] = None  # Total notes sounding at onset
+    voice_density_ratio: Optional[float] = None  # This voice's notes / total notes at onset
+    
+    # Cross-voice interval context
+    interval_to_highest_voice: Optional[int] = None  # Interval to highest sounding note
+    interval_to_lowest_voice: Optional[int] = None  # Interval to lowest sounding note
+    interval_to_voice_center: Optional[int] = None  # Interval to average pitch of all voices
+    
+    #########################################################
+    ##### RHYTHMIC FEATURES #################################
+    #########################################################
+    # Basic rhythmic features
+    duration_ratio_next: Optional[float] = None  # duration ratio to next note (original)
+    duration_ratio_prev: Optional[float] = None  # duration ratio from previous note
+    
+    # Enhanced rhythmic context
+    rhythmic_context: Optional[str] = None  # e.g., "s-s-l" (short-short-long)
+    rhythmic_pattern_3step: Optional[str] = None  # 3-step rhythmic pattern
+    rhythmic_pattern_5step: Optional[str] = None  # 5-step rhythmic pattern
+    
+    # Beat position features
+    beat_position_in_measure: Optional[float] = None  # 0-1, position within measure
+    beat_position_in_phrase: Optional[float] = None  # 0-1, position within phrase
+    is_on_beat: Optional[bool] = None  # Whether note starts on a strong beat
+    is_on_downbeat: Optional[bool] = None  # Whether note starts on measure downbeat
+    
+    # Duration context
+    duration_relative_to_voice_avg: Optional[float] = None  # Duration / voice average duration
+    duration_relative_to_piece_avg: Optional[float] = None  # Duration / piece average duration
+    duration_rank_in_voice: Optional[float] = None  # 0-1, rank of duration within voice
+    duration_rank_in_piece: Optional[float] = None  # 0-1, rank of duration within piece
+    
+    #########################################################
+    ##### PHRASE FEATURES ###################################
+    #########################################################
+    # Basic phrase features
+    position_in_phrase: Optional[float] = None  # 0.0 to 1.0 (original)
+    phrase_length: Optional[int] = None  # Number of notes in phrase
+    
+    # Implication-Realization analysis
+    ir_label: Optional[str] = None  # Implication-Realization label
+    ir_closure: Optional[float] = None  # Musical closure measure
+    
+    #########################################################
+    ##### EXPRESSIVE TARGETS ################################
+    #########################################################
     # Expressive targets (None for inference)
     beat_period: Optional[float] = None  # Beat period 
     timing: Optional[float] = None  # Timing 
@@ -28,8 +115,6 @@ class ExpressiveNote:
     ##### MIDIHUM FEATURES ##################################
     #########################################################
     
-    pitch_class: Optional[int] = None  # 0-11 pitch class
-    octave: Optional[int] = None  # Octave number
     follows_pause: Optional[bool] = None  # Whether note follows a pause
     
     # Chord context features

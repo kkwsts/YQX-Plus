@@ -416,15 +416,17 @@ class YQXSystem:
                     continue
                 
                 # Load score with force_note_ids='keep' for ATEPP
-                score = pt.load_musicxml(s_path, force_note_ids='keep')
-                
-                # Check if score needs unfolding (based on alignment IDs)
-                if (len(alignment) > 0 and 'score_id' in alignment[0] 
-                    and "-" in str(alignment[0]['score_id'])
-                    and "-" not in str(score.note_array()['id'][0])):
-                    # Unfold the score if needed
+                score = pt.load_musicxml(s_path, force_note_ids='keep')  
+                # if doesn't match the note id in alignment, unfold the score.
+                if (('score_id' in alignment[0]) 
+                    and ("-" in alignment[0]['score_id'])
+                    and ("-" not in score.note_array(include_divs_per_quarter=False)['id'][0])): 
                     score = pt.score.unfold_part_maximal(pt.score.merge_parts(score.parts)) 
                 
+                for a in alignment:
+                    if 'score_id' in a:
+                        a['score_id'] = a['score_id'].replace("P00_", "")
+
                 # Load performance
                 performance = pt.load_performance(p_path)
                 
@@ -441,6 +443,26 @@ class YQXSystem:
                 # Get score note array and filter to matched notes
                 snote_array = score.note_array()
                 matched_snote_array = snote_array[np.isin(snote_array['id'], snote_ids)]
+                
+                # sometimes the matched_snotes_array are shorter after the filtering (some id misfound?) so
+                # we need to remove the corresponding parameters in the parameters array
+                if len(matched_snote_array) != len(parameters):
+                    # Get the IDs that were actually found in the score
+                    matched_ids = matched_snote_array['id']
+                    
+                    # Check for duplicates in snote_ids
+                    unique_snote_ids, unique_indices = np.unique(snote_ids, return_index=True)
+                    if len(unique_snote_ids) != len(snote_ids):
+                        print(f"Warning: Found {len(snote_ids) - len(unique_snote_ids)} duplicate IDs in snote_ids")
+                        # Use only the first occurrence of each ID
+                        snote_ids = np.array(snote_ids)[unique_indices]
+                        parameters = parameters[unique_indices]
+                    
+                    # Now filter to only include parameters for IDs that exist in the score
+                    present_mask = np.isin(snote_ids, matched_ids)
+                    parameters = parameters[present_mask]
+                
+                    assert len(matched_snote_array) == len(parameters), "Length mismatch after filtering"
                 
                 if len(matched_snote_array) > 0 and len(parameters) > 0:
                     note_array_pairs.append((matched_snote_array, parameters))

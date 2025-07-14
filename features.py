@@ -344,15 +344,40 @@ class FeatureExtractor:
     def extract_features(self, score_notes: np.ndarray, parameters: Optional[np.ndarray] = None, 
                          plot: Optional[bool] = False, use_midihum_features: bool = False) -> List[ExpressiveNote]:
         """
-        Extract features from score and parameters (if available).
-        If use_midihum_features is True, augment features using MidiHumFeatureEngineer and return as ExpressiveNote list.
+        Extract comprehensive features from score and parameters (if available).
+        Features are organized into pitch, voice, rhythm, and phrase categories.
+        If use_midihum_features is True, augment features using MidiHumFeatureEngineer.
         """
         voices = self.extract_voices(score_notes)
         phrase_boundaries = self.detect_phrase_boundaries(score_notes)
+        
+        # Pre-compute global statistics for normalization
+        all_pitches = score_notes['pitch']
+        all_durations = score_notes['duration_beat']
+        piece_pitch_range = (all_pitches.min(), all_pitches.max())
+        piece_avg_duration = all_durations.mean()
+        
+        # Pre-compute voice statistics
+        voice_stats = {}
+        for voice_idx, voice_notes in enumerate(voices):
+            voice_pitches = voice_notes['pitch']
+            voice_durations = voice_notes['duration_beat']
+            voice_stats[voice_idx] = {
+                'pitch_range': (voice_pitches.min(), voice_pitches.max()),
+                'avg_duration': voice_durations.mean(),
+                'duration_ranks': np.argsort(np.argsort(voice_durations)) / len(voice_durations)
+            }
+        
+        # Pre-compute duration ranks for the entire piece
+        piece_duration_ranks = np.argsort(np.argsort(all_durations)) / len(all_durations)
 
         expressive_notes = []
         
-        for voice_notes in voices:
+        for voice_idx, voice_notes in enumerate(voices):
+            # Compute voice layer information
+            voice_pitches = voice_notes['pitch']
+            voice_layers = self._compute_voice_layers(voice_pitches)
+            
             for i, note in enumerate(voice_notes):
                 # Basic note information
                 pitch = note['pitch']
@@ -360,29 +385,38 @@ class FeatureExtractor:
                 duration_beat = note['duration_beat']
                 voice = note['voice']
                 
-                # Context features
-                if i < len(voice_notes) - 1:
-                    pitch_interval = voice_notes[i+1]['pitch'] - pitch
-                    duration_ratio = voice_notes[i+1]['duration_beat'] / duration_beat if duration_beat > 0 else 1.0
-                else:
-                    pitch_interval = 0
-                    duration_ratio = 1.0
+                # ========================================
+                # PITCH FEATURES
+                # ========================================
+                pitch_features = self._extract_pitch_features(
+                    voice_notes, i, pitch, piece_pitch_range, voice_stats[voice_idx]
+                )
                 
-                rhythmic_context = self.compute_rhythmic_context(voice_notes['duration_beat'], i)
-                ir_label, ir_closure = self.compute_ir_analysis(voice_notes['pitch'], i)
+                # ========================================
+                # VOICE FEATURES  
+                # ========================================
+                voice_features = self._extract_voice_features(
+                    score_notes, voice_notes, i, pitch, onset_beat, voice_layers[i]
+                )
                 
-                # Position in phrase
-                phrase_idx = 0
-                for j, boundary in enumerate(phrase_boundaries[:-1]):
-                    if boundary <= i < phrase_boundaries[j+1]:
-                        phrase_idx = j
-                        break
+                # ========================================
+                # RHYTHMIC FEATURES
+                # ========================================
+                rhythmic_features = self._extract_rhythmic_features(
+                    voice_notes, i, duration_beat, piece_avg_duration, 
+                    voice_stats[voice_idx], piece_duration_ranks
+                )
                 
-                phrase_start = phrase_boundaries[phrase_idx]
-                phrase_end = phrase_boundaries[phrase_idx + 1]
-                position_in_phrase = (i - phrase_start) / max(1, phrase_end - phrase_start)
+                # ========================================
+                # PHRASE FEATURES
+                # ========================================
+                phrase_features = self._extract_phrase_features(
+                    voice_notes, i, phrase_boundaries
+                )
                 
-                # Expressive targets (if performance data available)
+                # ========================================
+                # EXPRESSIVE TARGETS
+                # ========================================
                 beat_period = None
                 timing = None
                 velocity = None
@@ -390,28 +424,32 @@ class FeatureExtractor:
                 
                 if parameters is not None and i < len(parameters):
                     perf_param = parameters[i]
-                    
-                    # Timing ratio (IOI ratio)
                     beat_period = perf_param['beat_period'] 
                     timing = perf_param['timing'] 
-                    
-                    # Loudness (velocity)
                     velocity = perf_param['velocity']
-                    
-                    # Articulation ratio
                     articulation_log = perf_param['articulation_log'] 
                 
+                # Create ExpressiveNote with all features
                 expressive_note = ExpressiveNote(
+                    # Basic features
                     pitch=pitch,
                     onset_beat=onset_beat,
                     duration_beat=duration_beat,
                     voice=voice,
-                    pitch_interval=pitch_interval,
-                    duration_ratio=duration_ratio,
-                    rhythmic_context=rhythmic_context,
-                    ir_label=ir_label,
-                    ir_closure=ir_closure,
-                    position_in_phrase=position_in_phrase,
+                    
+                    # Pitch features
+                    **pitch_features,
+                    
+                    # Voice features
+                    **voice_features,
+                    
+                    # Rhythmic features
+                    **rhythmic_features,
+                    
+                    # Phrase features
+                    **phrase_features,
+                    
+                    # Expressive targets
                     beat_period=beat_period,
                     timing=timing,
                     velocity=velocity,
@@ -765,6 +803,260 @@ class FeatureExtractor:
             perf_params['timing'] = perf_params['timing'] * scale
                 
         return score_notes, perf_params, avg_tempo
+    
+    def _compute_voice_layers(self, voice_pitches: np.ndarray) -> np.ndarray:
+        """Compute voice layer (0=lowest, 1=middle, 2=highest) for each note in a voice"""
+        if len(voice_pitches) == 0:
+            return np.array([])
+        
+        # Sort pitches and assign layers
+        sorted_indices = np.argsort(voice_pitches)
+        layers = np.zeros(len(voice_pitches), dtype=int)
+        
+        # Assign layers: 0=lowest third, 1=middle third, 2=highest third
+        third = len(voice_pitches) // 3
+        layers[sorted_indices[:third]] = 0
+        layers[sorted_indices[third:2*third]] = 1
+        layers[sorted_indices[2*third:]] = 2
+        
+        return layers
+    
+    def _extract_pitch_features(self, voice_notes: np.ndarray, idx: int, pitch: int, 
+                               piece_pitch_range: tuple, voice_stats: dict) -> dict:
+        """Extract comprehensive pitch-related features"""
+        features = {}
+        
+        # Basic pitch features
+        features['pitch_class'] = pitch % 12
+        features['octave'] = pitch // 12
+        
+        # Interval transitions (enhanced)
+        if idx < len(voice_notes) - 1:
+            features['pitch_interval_next'] = voice_notes[idx+1]['pitch'] - pitch
+        else:
+            features['pitch_interval_next'] = 0
+            
+        if idx > 0:
+            features['pitch_interval_prev'] = pitch - voice_notes[idx-1]['pitch']
+        else:
+            features['pitch_interval_prev'] = 0
+        
+        # Multi-step interval context
+        if idx < len(voice_notes) - 2:
+            features['pitch_interval_2next'] = voice_notes[idx+2]['pitch'] - pitch
+        else:
+            features['pitch_interval_2next'] = 0
+            
+        if idx > 1:
+            features['pitch_interval_2prev'] = pitch - voice_notes[idx-2]['pitch']
+        else:
+            features['pitch_interval_2prev'] = 0
+            
+        if idx < len(voice_notes) - 3:
+            features['pitch_interval_3next'] = voice_notes[idx+3]['pitch'] - pitch
+        else:
+            features['pitch_interval_3next'] = 0
+            
+        if idx > 2:
+            features['pitch_interval_3prev'] = pitch - voice_notes[idx-3]['pitch']
+        else:
+            features['pitch_interval_3prev'] = 0
+        
+        # Interval direction patterns
+        features['interval_direction'] = self._get_interval_direction(features['pitch_interval_next'])
+        features['interval_direction_2step'] = self._get_interval_direction(features['pitch_interval_2next'])
+        features['interval_direction_3step'] = self._get_interval_direction(features['pitch_interval_3next'])
+        
+        # Melodic contour features
+        features['melodic_contour_3step'] = self._get_melodic_contour(voice_notes, idx, 3)
+        features['melodic_contour_5step'] = self._get_melodic_contour(voice_notes, idx, 5)
+        
+        # Pitch range context
+        voice_min, voice_max = voice_stats['pitch_range']
+        piece_min, piece_max = piece_pitch_range
+        
+        if voice_max > voice_min:
+            features['pitch_relative_to_voice_range'] = (pitch - voice_min) / (voice_max - voice_min)
+        else:
+            features['pitch_relative_to_voice_range'] = 0.5
+            
+        if piece_max > piece_min:
+            features['pitch_relative_to_piece_range'] = (pitch - piece_min) / (piece_max - piece_min)
+        else:
+            features['pitch_relative_to_piece_range'] = 0.5
+        
+        return features
+    
+    def _extract_voice_features(self, score_notes: np.ndarray, voice_notes: np.ndarray, 
+                               idx: int, pitch: int, onset_beat: float, voice_layer: int) -> dict:
+        """Extract voice-related features including cross-voice context"""
+        features = {}
+        
+        # Voice layer information
+        features['voice_layer'] = voice_layer
+        features['voice_layer_relative'] = voice_layer / 2.0  # Normalize to 0-1
+        
+        # Find notes sounding at the same time (within a small tolerance)
+        tolerance = 0.01  # 10ms tolerance
+        sounding_notes = score_notes[
+            (score_notes['onset_beat'] <= onset_beat) & 
+            (score_notes['onset_beat'] + score_notes['duration_beat'] > onset_beat)
+        ]
+        
+        # Notes above/below context
+        notes_above = sounding_notes[sounding_notes['pitch'] > pitch]
+        notes_below = sounding_notes[sounding_notes['pitch'] < pitch]
+        
+        features['notes_above_count'] = len(notes_above)
+        features['notes_below_count'] = len(notes_below)
+        
+        if len(notes_above) > 0:
+            features['notes_above_avg_pitch'] = notes_above['pitch'].mean()
+            features['notes_above_max_pitch'] = notes_above['pitch'].max()
+        else:
+            features['notes_above_avg_pitch'] = pitch
+            features['notes_above_max_pitch'] = pitch
+            
+        if len(notes_below) > 0:
+            features['notes_below_avg_pitch'] = notes_below['pitch'].mean()
+            features['notes_below_min_pitch'] = notes_below['pitch'].min()
+        else:
+            features['notes_below_avg_pitch'] = pitch
+            features['notes_below_min_pitch'] = pitch
+        
+        # Voice density
+        features['voice_density_at_onset'] = len(sounding_notes)
+        features['voice_density_ratio'] = len(sounding_notes) / max(1, len(score_notes))
+        
+        # Cross-voice interval context
+        if len(sounding_notes) > 0:
+            highest_pitch = sounding_notes['pitch'].max()
+            lowest_pitch = sounding_notes['pitch'].min()
+            avg_pitch = sounding_notes['pitch'].mean()
+            
+            features['interval_to_highest_voice'] = highest_pitch - pitch
+            features['interval_to_lowest_voice'] = lowest_pitch - pitch
+            features['interval_to_voice_center'] = avg_pitch - pitch
+        else:
+            features['interval_to_highest_voice'] = 0
+            features['interval_to_lowest_voice'] = 0
+            features['interval_to_voice_center'] = 0
+        
+        return features
+    
+    def _extract_rhythmic_features(self, voice_notes: np.ndarray, idx: int, duration_beat: float,
+                                  piece_avg_duration: float, voice_stats: dict, 
+                                  piece_duration_ranks: np.ndarray) -> dict:
+        """Extract comprehensive rhythmic features"""
+        features = {}
+        
+        # Basic rhythmic features
+        if idx < len(voice_notes) - 1:
+            features['duration_ratio_next'] = voice_notes[idx+1]['duration_beat'] / duration_beat if duration_beat > 0 else 1.0
+        else:
+            features['duration_ratio_next'] = 1.0
+            
+        if idx > 0:
+            features['duration_ratio_prev'] = duration_beat / voice_notes[idx-1]['duration_beat'] if voice_notes[idx-1]['duration_beat'] > 0 else 1.0
+        else:
+            features['duration_ratio_prev'] = 1.0
+        
+        # Enhanced rhythmic context
+        features['rhythmic_context'] = self.compute_rhythmic_context(voice_notes['duration_beat'], idx)
+        features['rhythmic_pattern_3step'] = self._get_rhythmic_pattern(voice_notes, idx, 3)
+        features['rhythmic_pattern_5step'] = self._get_rhythmic_pattern(voice_notes, idx, 5)
+        
+        # Beat position features (simplified - would need measure information for full accuracy)
+        onset_beat = voice_notes[idx]['onset_beat']
+        features['beat_position_in_measure'] = (onset_beat % 4) / 4  # Assuming 4/4 time
+        features['is_on_beat'] = abs(onset_beat % 1) < 0.1  # Within 0.1 beats of a whole beat
+        features['is_on_downbeat'] = abs(onset_beat % 4) < 0.1  # Within 0.1 beats of measure start
+        
+        # Duration context
+        features['duration_relative_to_voice_avg'] = duration_beat / voice_stats['avg_duration']
+        features['duration_relative_to_piece_avg'] = duration_beat / piece_avg_duration
+        features['duration_rank_in_voice'] = voice_stats['duration_ranks'][idx]
+        
+        # Find the corresponding piece duration rank (approximate)
+        piece_idx = np.searchsorted(np.sort(voice_notes['duration_beat']), duration_beat)
+        if piece_idx < len(piece_duration_ranks):
+            features['duration_rank_in_piece'] = piece_duration_ranks[piece_idx]
+        else:
+            features['duration_rank_in_piece'] = 0.5
+        
+
+        
+        return features
+    
+    def _extract_phrase_features(self, voice_notes: np.ndarray, idx: int, 
+                                phrase_boundaries: List[int]) -> dict:
+        """Extract phrase-related features"""
+        features = {}
+        
+        # Find which phrase this note belongs to
+        phrase_idx = 0
+        for j, boundary in enumerate(phrase_boundaries[:-1]):
+            if boundary <= idx < phrase_boundaries[j+1]:
+                phrase_idx = j
+                break
+        
+        phrase_start = phrase_boundaries[phrase_idx]
+        phrase_end = phrase_boundaries[phrase_idx + 1]
+        
+        # Basic phrase features
+        features['position_in_phrase'] = (idx - phrase_start) / max(1, phrase_end - phrase_start)
+        features['phrase_length'] = phrase_end - phrase_start
+        
+
+        
+        # Implication-Realization analysis
+        ir_label, ir_closure = self.compute_ir_analysis(voice_notes['pitch'], idx)
+        features['ir_label'] = ir_label
+        features['ir_closure'] = ir_closure
+        
+        return features
+    
+    def _get_interval_direction(self, interval: int) -> str:
+        """Get direction of interval: 'up', 'down', or 'same'"""
+        if interval > 0:
+            return "up"
+        elif interval < 0:
+            return "down"
+        else:
+            return "same"
+    
+    def _get_melodic_contour(self, voice_notes: np.ndarray, idx: int, steps: int) -> str:
+        """Get melodic contour pattern for given number of steps"""
+        if idx + steps >= len(voice_notes):
+            return "incomplete"
+        
+        contour = []
+        for i in range(steps):
+            if idx + i + 1 < len(voice_notes):
+                interval = voice_notes[idx + i + 1]['pitch'] - voice_notes[idx + i]['pitch']
+                contour.append(self._get_interval_direction(interval))
+        
+        return "-".join(contour)
+    
+    def _get_rhythmic_pattern(self, voice_notes: np.ndarray, idx: int, steps: int) -> str:
+        """Get rhythmic pattern for given number of steps"""
+        if idx + steps >= len(voice_notes):
+            return "incomplete"
+        
+        pattern = []
+        for i in range(steps):
+            if idx + i < len(voice_notes):
+                duration = voice_notes[idx + i]['duration_beat']
+                if duration < 0.5:
+                    pattern.append("s")  # short
+                elif duration < 1.0:
+                    pattern.append("m")  # medium
+                else:
+                    pattern.append("l")  # long
+        
+        return "-".join(pattern)
+    
+
         
 
 class MidiHumFeatureEngineer:
