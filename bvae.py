@@ -7,8 +7,170 @@ from typing import List, Tuple, Dict, Optional
 from sklearn.preprocessing import StandardScaler
 from torchinfo import summary
 import wandb
-
+import math
+from audiocraft.modules.transformer import StreamingTransformerLayer, create_norm_fn
+from audiocraft.modules.unet_transformer import UnetTransformer
 from expressivenote import ExpressiveNote
+
+
+class TransformerEncoder(nn.Module):
+    """Transformer-based encoder for context features"""
+    def __init__(self, input_dim: int, hidden_dim: int, num_heads: int = 4, num_layers: int = 2):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        
+        # Input projection
+        self.input_projection = nn.Linear(input_dim, hidden_dim)
+        
+        # Transformer layers
+        try:
+            self.transformer = UnetTransformer(
+                d_model=hidden_dim,
+                num_heads=num_heads,
+                dim_feedforward=int(4 * hidden_dim),
+                norm='layer_norm',
+                norm_first=True,
+                layer_class=StreamingTransformerLayer,
+                num_layers=num_layers,
+                dropout=0.1,
+                activation='gelu'
+            )
+        except:
+            self.transformer = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(
+                    d_model=hidden_dim,
+                    nhead=num_heads,
+                    dim_feedforward=int(4 * hidden_dim),
+                    dropout=0.1,
+                    activation='gelu',
+                    norm_first=True,
+                    batch_first=True
+                ),
+                num_layers=num_layers
+            )
+        
+        # Output normalization
+        try:
+            self.out_norm = create_norm_fn('layer_norm', hidden_dim)
+        except:
+            self.out_norm = nn.LayerNorm(hidden_dim)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input features [batch_size, input_dim]
+        Returns:
+            Encoded features [batch_size, hidden_dim]
+        """
+        # Project to hidden dimension
+        embedded = self.input_projection(x)  # [B, hidden_dim]
+        
+        # Add sequence dimension for transformer
+        embedded = embedded.unsqueeze(1)  # [B, 1, hidden_dim]
+        
+        # Apply transformer
+        transformer_output = self.transformer(embedded)  # [B, 1, hidden_dim]
+        
+        # Remove sequence dimension and normalize
+        output = transformer_output.squeeze(1)  # [B, hidden_dim]
+        output = self.out_norm(output)
+        
+        return output
+
+
+class TransformerDecoder(nn.Module):
+    """Transformer-based decoder for generating targets from latent + context"""
+    def __init__(self, latent_dim: int, context_dim: int, target_dim: int, 
+                 hidden_dim: int, num_heads: int = 4, num_layers: int = 2):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.context_dim = context_dim
+        self.target_dim = target_dim
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        
+        # Input projection (latent + context)
+        input_dim = latent_dim + context_dim
+        self.input_projection = nn.Linear(input_dim, hidden_dim)
+        
+        # Transformer layers
+        try:
+            self.transformer = UnetTransformer(
+                d_model=hidden_dim,
+                num_heads=num_heads,
+                dim_feedforward=int(4 * hidden_dim),
+                norm='layer_norm',
+                norm_first=True,
+                layer_class=StreamingTransformerLayer,
+                num_layers=num_layers,
+                dropout=0.1,
+                activation='gelu'
+            )
+        except:
+            self.transformer = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(
+                    d_model=hidden_dim,
+                    nhead=num_heads,
+                    dim_feedforward=int(4 * hidden_dim),
+                    dropout=0.1,
+                    activation='gelu',
+                    norm_first=True,
+                    batch_first=True
+                ),
+                num_layers=num_layers
+            )
+        
+        # Output normalization and projection
+        try:
+            self.out_norm = create_norm_fn('layer_norm', hidden_dim)
+        except:
+            self.out_norm = nn.LayerNorm(hidden_dim)
+        
+        self.output_projection = nn.Linear(hidden_dim, target_dim)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+    
+    def forward(self, latent: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            latent: Latent representation [batch_size, latent_dim]
+            context: Context features [batch_size, context_dim]
+        Returns:
+            Decoded targets [batch_size, target_dim]
+        """
+        combined_input = torch.cat([latent, context], dim=1)  # [B, latent_dim + context_dim]
+        
+        embedded = self.input_projection(combined_input)  # [B, hidden_dim]
+        
+        embedded = embedded.unsqueeze(1)  # [B, 1, hidden_dim]
+        
+        transformer_output = self.transformer(embedded)  # [B, 1, hidden_dim]
+        
+        output = transformer_output.squeeze(1)  # [B, hidden_dim]
+        output = self.out_norm(output)
+        output = self.output_projection(output)  # [B, target_dim]
+        
+        return output
 
 
 class BetaVAE(nn.Module):
@@ -26,7 +188,9 @@ class BetaVAE(nn.Module):
                  context_dim: int = 9,
                  target_dim: int = 4, 
                  latent_dim: int = 64,
-                 hidden_dims: List[int] = [256, 128],
+                 hidden_dim: int = 128,
+                 num_heads: int = 4,
+                 num_layers: int = 2,
                  beta: float = 1.0,
                  gamma: float = 10.0,
                  max_capacity: int = 10,
@@ -38,6 +202,9 @@ class BetaVAE(nn.Module):
         self.context_dim = context_dim
         self.target_dim = target_dim
         self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
         self.beta = beta
         self.gamma = gamma
         self.max_capacity = max_capacity
@@ -48,40 +215,26 @@ class BetaVAE(nn.Module):
         self.device = device
         
         # Build encoder: context -> latent (no target input to avoid leakage)
-        encoder_layers = []
-        
-        prev_dim = context_dim
-        for h_dim in hidden_dims:
-            encoder_layers.extend([
-                nn.Linear(prev_dim, h_dim),
-                nn.BatchNorm1d(h_dim),
-                nn.LeakyReLU(0.2),
-                nn.Dropout(0.1)
-            ])
-            prev_dim = h_dim
-        
-        self.encoder = nn.Sequential(*encoder_layers)
+        self.encoder = TransformerEncoder(
+            input_dim=context_dim,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_layers
+        )
         
         # Latent space
-        self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
-        self.fc_var = nn.Linear(hidden_dims[-1], latent_dim)
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_var = nn.Linear(hidden_dim, latent_dim)
         
         # Build decoder: latent + context -> target
-        decoder_input_dim = latent_dim + context_dim
-        decoder_layers = []
-        
-        prev_dim = decoder_input_dim
-        for h_dim in reversed(hidden_dims):
-            decoder_layers.extend([
-                nn.Linear(prev_dim, h_dim),
-                nn.BatchNorm1d(h_dim),
-                nn.LeakyReLU(0.2),
-                nn.Dropout(0.1)
-            ])
-            prev_dim = h_dim
-        
-        decoder_layers.append(nn.Linear(hidden_dims[0], target_dim))
-        self.decoder = nn.Sequential(*decoder_layers)
+        self.decoder = TransformerDecoder(
+            latent_dim=latent_dim,
+            context_dim=context_dim,
+            target_dim=target_dim,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_layers
+        )
         
         # Scalers for normalization
         self.context_scaler = StandardScaler()
@@ -109,8 +262,7 @@ class BetaVAE(nn.Module):
     
     def decode(self, z: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
         """Decode latent + context to target parameters"""
-        decoder_input = torch.cat([z, context], dim=1)
-        return self.decoder(decoder_input)
+        return self.decoder(z, context)
     
     def forward(self, context: torch.Tensor, target: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Forward pass through β-VAE"""
@@ -210,7 +362,9 @@ class BVAEExpressiveModel:
                  context_dim: int = 9,
                  target_dim: int = 4,
                  latent_dim: int = 64,
-                 hidden_dims: List[int] = [256, 128],
+                 hidden_dim: int = 128,
+                 num_heads: int = 4,
+                 num_layers: int = 2,
                  beta: float = 4.0,
                  gamma: float = 1000.0,
                  use_midihum: bool = False,
@@ -220,7 +374,9 @@ class BVAEExpressiveModel:
         self.context_dim = context_dim
         self.target_dim = target_dim
         self.latent_dim = latent_dim
-        self.hidden_dims = hidden_dims
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
         self.beta = beta
         self.gamma = gamma
         self.use_midihum = use_midihum
@@ -249,7 +405,9 @@ class BVAEExpressiveModel:
             context_dim=context_dim,
             target_dim=self.target_dim,
             latent_dim=self.latent_dim,
-            hidden_dims=self.hidden_dims,
+            hidden_dim=self.hidden_dim,
+            num_heads=self.num_heads,
+            num_layers=self.num_layers,
             beta=self.beta,
             gamma=self.gamma,
             use_midihum=self.use_midihum,
@@ -301,8 +459,11 @@ class BVAEExpressiveModel:
         
         self.model.train()
         best_loss = float('inf')
+        best_epoch = 0
         patience = max(10, epochs // 10)
         patience_counter = 0
+        
+        best_model_state = None
         
         for epoch in range(epochs):
             epoch_loss = 0.0
@@ -354,6 +515,12 @@ class BVAEExpressiveModel:
                     val_kld_loss = val_loss_dict['KLD'].item()
                 self.model.train()
             
+            current_loss = val_loss if val_loss is not None else (epoch_loss / num_batches)
+            if current_loss < best_loss:
+                best_loss = current_loss
+                best_epoch = epoch
+                best_model_state = self.model.state_dict().copy()
+            
             # Log to wandb
             if val_loss is not None:
                 wandb.log({
@@ -388,6 +555,11 @@ class BVAEExpressiveModel:
         
         self.trained = True
         print("β-VAE training completed!")
+        print(f"Best model was at epoch {best_epoch + 1} with loss: {best_loss:.6f}")
+        
+        self.best_model_state = best_model_state
+        self.best_epoch = best_epoch
+        self.best_loss = best_loss
     
     def predict(self, context_features: np.ndarray, 
                 num_samples: int = 1) -> np.ndarray:
@@ -426,7 +598,7 @@ class BVAEExpressiveModel:
             mu, log_var = self.model.encode(context_features)
             return mu.cpu().numpy()
     
-    def save(self, filepath: str, feature_scaler=None):
+    def save(self, filepath: str, feature_scaler=None, save_best: bool = True):
         """Save trained β-VAE model"""
         if feature_scaler is not None:
             self.feature_scaler = feature_scaler
@@ -438,15 +610,48 @@ class BVAEExpressiveModel:
             'context_dim': self.context_dim,
             'target_dim': self.target_dim,
             'latent_dim': self.latent_dim,
-            'hidden_dims': self.hidden_dims,
+            'hidden_dim': self.hidden_dim,
+            'num_heads': self.num_heads,
+            'num_layers': self.num_layers,
             'beta': self.beta,
             'gamma': self.gamma,
             'use_midihum': self.use_midihum,
             'learning_rate': self.learning_rate,
             'trained': self.trained,
-            'feature_scaler': self.feature_scaler
+            'feature_scaler': self.feature_scaler,
+            'model_type': 'last'
         }
         torch.save(model_data, filepath)
+        print(f"Last model saved to {filepath}")
+        
+        if save_best and hasattr(self, 'best_model_state') and self.best_model_state is not None:
+            base_path = filepath.rsplit('.', 1)[0] 
+            extension = filepath.rsplit('.', 1)[1] if '.' in filepath else 'pth'
+            best_filepath = f"{base_path}_best.{extension}"
+            
+            best_model_data = {
+                'model_state_dict': self.best_model_state,
+                'context_scaler': self.context_scaler,
+                'target_scaler': self.target_scaler,
+                'context_dim': self.context_dim,
+                'target_dim': self.target_dim,
+                'latent_dim': self.latent_dim,
+                'hidden_dim': self.hidden_dim,
+                'num_heads': self.num_heads,
+                'num_layers': self.num_layers,
+                'beta': self.beta,
+                'gamma': self.gamma,
+                'use_midihum': self.use_midihum,
+                'learning_rate': self.learning_rate,
+                'trained': self.trained,
+                'feature_scaler': self.feature_scaler,
+                'model_type': 'best',  # Indicate this is the best model
+                'best_epoch': getattr(self, 'best_epoch', 0),
+                'best_loss': getattr(self, 'best_loss', float('inf')),
+            }
+            torch.save(best_model_data, best_filepath)
+            print(f"Best model saved to {best_filepath}")
+            print(f"Best model was at epoch {getattr(self, 'best_epoch', 0) + 1} with loss: {getattr(self, 'best_loss', float('inf')):.6f}")
     
     def load(self, filepath: str):
         """Load trained β-VAE model"""
@@ -456,7 +661,9 @@ class BVAEExpressiveModel:
         self.context_dim = model_data['context_dim']
         self.target_dim = model_data['target_dim']
         self.latent_dim = model_data['latent_dim']
-        self.hidden_dims = model_data['hidden_dims']
+        self.hidden_dim = model_data.get('hidden_dim', 128) 
+        self.num_heads = model_data.get('num_heads', 4) 
+        self.num_layers = model_data.get('num_layers', 2)
         self.beta = model_data['beta']
         self.gamma = model_data['gamma']
         self.use_midihum = model_data['use_midihum']
@@ -473,6 +680,16 @@ class BVAEExpressiveModel:
         # Restore scalers
         self.context_scaler = model_data['context_scaler']
         self.target_scaler = model_data['target_scaler']
+        
+        model_type = model_data.get('model_type', 'unknown')
+        if model_type == 'best':
+            best_epoch = model_data.get('best_epoch', 0)
+            best_loss = model_data.get('best_loss', float('inf'))
+            print(f"Loaded best model from epoch {best_epoch + 1} with loss: {best_loss:.6f}")
+        elif model_type == 'last':
+            print("Loaded last model (final epoch)")
+        else:
+            print("Loaded model (legacy format)")
 
     def model_summary(self):
         """Print detailed model architecture and parameter summary"""
@@ -494,7 +711,9 @@ class BVAEExpressiveModel:
         print(f"  • Context dimension: {self.context_dim}")
         print(f"  • Target dimension: {self.target_dim}")
         print(f"  • Latent dimension: {self.latent_dim}")
-        print(f"  • Hidden dimensions: {self.hidden_dims}")
+        print(f"  • Hidden dimension: {self.hidden_dim}")
+        print(f"  • Number of heads: {self.num_heads}")
+        print(f"  • Number of layers: {self.num_layers}")
         print(f"  • Beta (β): {self.beta}")
         print(f"  • Gamma (γ): {self.gamma}")
         print(f"  • Use MidiHum features: {self.use_midihum}")

@@ -17,7 +17,7 @@ data:
 
 # Model configuration
 model:
-  type: "gmm"  # Options: "gmm", "flow", "bvae"
+  type: "flow"  # Options: "gmm", "flow", "bvae"
   use_midihum_features: false
   
   # Model-specific parameters
@@ -30,11 +30,15 @@ model:
     num_heads: 8
     num_layers: 6
     flow_matcher_type: "standard" # "optimal_transport"
+    epochs: 100
+    batch_size: 32
     sigma: 0.01
     
   bvae:
     latent_dim: 64
-    hidden_dims: [256, 128]
+    hidden_dim: 128
+    num_heads: 4
+    num_layers: 2
     beta: 4.0
     gamma: 10.0
     learning_rate: 0.001
@@ -58,7 +62,7 @@ test:
 render:
   enabled: false
   input_score: "${data.vienna4x22_dir}/musicxml/Chopin_op10_no3.musicxml"
-  output_midi: "${output.output_dir}/Chopin_op10_no3_yqx_flow.mid"
+  output_midi: "${output.output_dir}/Chopin_op10_no3_flow.mid"
   initial_tempo: 120
 
 # Output configuration

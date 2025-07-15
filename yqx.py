@@ -148,7 +148,9 @@ class YQXSystem:
                 context_dim= self.train_features.shape[1],
                 target_dim= self.train_targets.shape[1],
                 latent_dim=bvae_config.get('latent_dim', 64),
-                hidden_dims=bvae_config.get('hidden_dims', [256, 128]),
+                hidden_dim=bvae_config.get('hidden_dim', 128),
+                num_heads=bvae_config.get('num_heads', 4),
+                num_layers=bvae_config.get('num_layers', 2),
                 beta=bvae_config.get('beta', 4.0),
                 gamma=bvae_config.get('gamma', 1000.0),
                 use_midihum=config.model.use_midihum_features,
@@ -190,7 +192,9 @@ class YQXSystem:
                     parts.append(f"fmt{config.model.flow.flow_matcher_type}")
             elif config.model.type == "bvae":
                 parts.append(f"ld{config.model.bvae.get('latent_dim', 64)}")
-                parts.append(f"hd{config.model.bvae.get('hidden_dims', [256, 128])}")
+                parts.append(f"hd{config.model.bvae.get('hidden_dim', 128)}")
+                parts.append(f"nh{config.model.bvae.get('num_heads', 4)}")
+                parts.append(f"nl{config.model.bvae.get('num_layers', 2)}")
                 parts.append(f"b{config.model.bvae.get('beta', 4.0)}")
                 parts.append(f"g{config.model.bvae.get('gamma', 10.0)}")
         
@@ -617,7 +621,7 @@ class YQXSystem:
         
         context_features = np.vstack(context_features)
         targets = np.vstack(targets)
-        print(f"Total features shape: {context_features.shape}, Total targets shape: {targets.shape}")
+        # print(f"Total features shape: {context_features.shape}, Total targets shape: {targets.shape}")
 
         # 90% train, 10% validation
         n_samples = context_features.shape[0]
@@ -788,11 +792,11 @@ class YQXSystem:
         pt.save_performance_midi(performance, output_path)
         
         
-    def save_model(self, filepath: str = None):
+    def save_model(self, filepath: str = None, save_best: bool = True):
         """Save trained model with integrated scaler"""
         filepath = filepath or self.model_path
         print(f"Saving model to: {filepath}")
-        self.model.save(filepath, self.feature_extractor.feature_scaler)
+        self.model.save(filepath, self.feature_extractor.feature_scaler, save_best=save_best)
     
     def load_model(self, filepath: str = None):
         """Load trained model with integrated scaler"""

@@ -408,9 +408,13 @@ class FMExpressiveModel(StreamingModule):
         
         super().train(mode=True)
         best_loss = float('inf')
+        best_epoch = 0
         patience = max(10, epochs // 10)
         patience_counter = 0
         global_step = 0
+        
+        # Store best model state
+        best_model_state = None
         
         for epoch in range(epochs):
             epoch_losses = []
@@ -470,7 +474,10 @@ class FMExpressiveModel(StreamingModule):
             current_loss = val_loss if val_loss is not None else avg_train_loss
             if current_loss < best_loss:
                 best_loss = current_loss
+                best_epoch = epoch
                 patience_counter = 0
+                # Save best model state
+                best_model_state = self.state_dict().copy()
             else:
                 patience_counter += 1
             
@@ -485,6 +492,12 @@ class FMExpressiveModel(StreamingModule):
         
         self.trained = True
         print(f"Training completed. Final loss: {best_loss:.6f}")
+        print(f"Best model was at epoch {best_epoch + 1} with loss: {best_loss:.6f}")
+        
+        # Store best model state for later saving
+        self.best_model_state = best_model_state
+        self.best_epoch = best_epoch
+        self.best_loss = best_loss
 
     def train(self, mode_or_features=True, targets=None, val_features=None, val_targets=None, **kwargs):
         if isinstance(mode_or_features, bool):
@@ -622,7 +635,7 @@ class FMExpressiveModel(StreamingModule):
         
         return predictions
 
-    def save(self, filepath: str, feature_scaler=None):
+    def save(self, filepath: str, feature_scaler=None, save_best: bool = True):
         if feature_scaler is not None:
             self.feature_scaler = feature_scaler
         
@@ -636,9 +649,34 @@ class FMExpressiveModel(StreamingModule):
             'scaler': self.scaler,
             'target_scaler': self.target_scaler,
             'feature_scaler': getattr(self, 'feature_scaler', None),  # Save feature_scaler if available
+            'model_type': 'last', 
         }
         torch.save(save_dict, filepath)
-        print(f"Model saved to {filepath}")
+        print(f"Last model saved to {filepath}")
+        
+        # Save best model
+        if save_best and hasattr(self, 'best_model_state') and self.best_model_state is not None:
+            base_path = filepath.rsplit('.', 1)[0] 
+            extension = filepath.rsplit('.', 1)[1] if '.' in filepath else 'pth'
+            best_filepath = f"{base_path}_best.{extension}"
+            
+            best_save_dict = {
+                'model_state_dict': self.best_model_state,
+                'features_dim': self.features_dim,  
+                'target_dim': self.target_dim,
+                'hidden_dim': self.hidden_dim,
+                'use_midihum': self.use_midihum,
+                'device': str(self.device),
+                'scaler': self.scaler,
+                'target_scaler': self.target_scaler,
+                'feature_scaler': getattr(self, 'feature_scaler', None),
+                'model_type': 'best',  # Indicate this is the best model
+                'best_epoch': getattr(self, 'best_epoch', 0),
+                'best_loss': getattr(self, 'best_loss', float('inf')),
+            }
+            torch.save(best_save_dict, best_filepath)
+            print(f"Best model saved to {best_filepath}")
+            print(f"Best model was at epoch {getattr(self, 'best_epoch', 0) + 1} with loss: {getattr(self, 'best_loss', float('inf')):.6f}")
 
     def load(self, filepath: str):
         """Enhanced load with AudioCraft compatibility"""
@@ -679,6 +717,16 @@ class FMExpressiveModel(StreamingModule):
         # Load model state
         try:
             self.load_state_dict(checkpoint['model_state_dict'])
+            model_type = checkpoint.get('model_type', 'unknown')
+            if model_type == 'best':
+                best_epoch = checkpoint.get('best_epoch', 0)
+                best_loss = checkpoint.get('best_loss', float('inf'))
+                print(f"Loaded best model from epoch {best_epoch + 1} with loss: {best_loss:.6f}")
+            elif model_type == 'last':
+                print("Loaded last model (final epoch)")
+            else:
+                print("Loaded model (legacy format)")
+                
         except Exception as e:
             print(f"Error loading model state: {e}")
             print("This might be due to AudioCraft availability mismatch. Consider retraining.")
