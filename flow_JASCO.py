@@ -334,7 +334,9 @@ class FMExpressiveModel(StreamingModule):
         
         return loss
 
-    def train(self, context_features: np.ndarray, targets: np.ndarray, epochs: int = 1000, batch_size: int = 32):
+    def train_model(self, context_features: np.ndarray, targets: np.ndarray, 
+                   val_features: np.ndarray = None, val_targets: np.ndarray = None,
+                   epochs: int = 1000, batch_size: int = 32):
         """Train the flow matching model on pre-extracted features and targets"""
         
         print("Training flow matching model...")
@@ -378,6 +380,23 @@ class FMExpressiveModel(StreamingModule):
             drop_last=True
         )
         
+        # Prepare validation data if provided
+        val_dataloader = None
+        if val_features is not None and val_targets is not None:
+            val_X = self.scaler.transform(val_features.copy())
+            val_y = self.target_scaler.transform(val_targets.copy())
+            
+            val_X_tensor = self._to_device(torch.FloatTensor(val_X))
+            val_y_tensor = self._to_device(torch.FloatTensor(val_y))
+            
+            val_dataset = torch.utils.data.TensorDataset(val_X_tensor, val_y_tensor)
+            val_dataloader = torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                drop_last=False
+            )
+        
         optimizer = torch.optim.AdamW(
             self.parameters(), 
             lr=1e-4, 
@@ -396,6 +415,7 @@ class FMExpressiveModel(StreamingModule):
         for epoch in range(epochs):
             epoch_losses = []
             
+            self.train()
             for batch_features, batch_targets in dataloader:
                 optimizer.zero_grad()
                 
@@ -416,19 +436,40 @@ class FMExpressiveModel(StreamingModule):
                 })
                 global_step += 1
             
-            avg_loss = np.mean(epoch_losses)
+            avg_train_loss = np.mean(epoch_losses)
+            
+            # Validation phase
+            val_loss = None
+            if val_dataloader is not None:
+                self.eval()
+                val_losses = []
+                with torch.no_grad():
+                    for batch_features, batch_targets in val_dataloader:
+                        loss = self.flow_matching_loss(batch_features, batch_targets)
+                        val_losses.append(loss.item())
+                val_loss = np.mean(val_losses)
+            
             scheduler.step()
 
-            # Log epoch-level metrics
-            wandb.log({
-                "epoch": epoch,
-                "epoch_loss": avg_loss,
-                "learning_rate": scheduler.get_last_lr()[0]
-            })
+            # # Log epoch-level metrics
+            if val_loss is not None:
+                wandb.log({
+                    "epoch": epoch,
+                    "train_loss": avg_train_loss,
+                    "val_loss": val_loss,
+                    "learning_rate": scheduler.get_last_lr()[0]
+                })
+            else:
+                wandb.log({
+                    'epoch': epoch,
+                    'train_loss': avg_train_loss,
+                    'learning_rate': scheduler.get_last_lr()[0]
+                })
             
-            # Early stopping
-            if avg_loss < best_loss:
-                best_loss = avg_loss
+            # Early stopping based on validation loss if available, otherwise training loss
+            current_loss = val_loss if val_loss is not None else avg_train_loss
+            if current_loss < best_loss:
+                best_loss = current_loss
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -439,10 +480,17 @@ class FMExpressiveModel(StreamingModule):
             
             if (epoch + 1) % 10 == 0:
                 lr = optimizer.param_groups[0]['lr']
-                print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, LR: {lr:.2e}")
+                val_str = f", Val Loss: {val_loss:.4f}" if val_loss is not None else ""
+                print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}{val_str}, LR: {lr:.2e}")
         
         self.trained = True
         print(f"Training completed. Final loss: {best_loss:.6f}")
+
+    def train(self, mode_or_features=True, targets=None, val_features=None, val_targets=None, **kwargs):
+        if isinstance(mode_or_features, bool):
+            return super().train(mode_or_features)
+        context_features = mode_or_features
+        return self.train_model(context_features, targets, val_features=val_features, val_targets=val_targets, **kwargs)
 
     def sample(self, features: torch.Tensor, n_steps: int = 50, method: str = "dopri5", 
                ode_rtol: float = 1e-5, ode_atol: float = 1e-5) -> torch.Tensor:

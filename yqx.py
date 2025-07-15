@@ -25,6 +25,7 @@ warnings.filterwarnings('ignore')
 from expressivenote import ExpressiveNote  
 from gmm import BayesianExpressiveModel
 from bvae import BVAEExpressiveModel
+from flow import FMExpressiveModel
 from features import FeatureExtractor
 
 
@@ -103,8 +104,15 @@ class YQXSystem:
         
         # Initialize components
         self.feature_extractor = FeatureExtractor()
+
+        # Initialize wandb
+        wandb.init(
+            project="yqx-expressive-performance",
+            config=dict(self.config),
+            name=self._generate_model_identifier(self.config)
+        )
         
-        self.context_features, self.targets = self.load_data()
+        self.train_features, self.train_targets, self.val_features, self.val_targets = self.load_data()
 
         device = config.model.get('device', 'cpu')
         if device.startswith('cuda:'):
@@ -122,11 +130,10 @@ class YQXSystem:
                 random_state=gmm_config.get('random_state', 42)
             )
         elif config.model.type == "flow":
-            from flow_JASCO import FMExpressiveModel
             flow_config = config.model.flow
             self.model = FMExpressiveModel(
-                features_dim=self.context_features.shape[1],
-                target_dim=self.targets.shape[1], 
+                features_dim= self.train_features.shape[1],
+                target_dim= self.train_targets.shape[1],
                 hidden_dim=flow_config.get('hidden_dim', 128),
                 use_midihum=config.model.use_midihum_features,
                 num_heads=flow_config.get('num_heads', 4),
@@ -138,8 +145,8 @@ class YQXSystem:
         elif config.model.type == "bvae":
             bvae_config = config.model.bvae
             self.model = BVAEExpressiveModel(
-                context_dim= self.context_features.shape[1],
-                target_dim= self.targets.shape[1],
+                context_dim= self.train_features.shape[1],
+                target_dim= self.train_targets.shape[1],
                 latent_dim=bvae_config.get('latent_dim', 64),
                 hidden_dims=bvae_config.get('hidden_dims', [256, 128]),
                 beta=bvae_config.get('beta', 4.0),
@@ -577,7 +584,8 @@ class YQXSystem:
         return context_features, targets
 
 
-    def load_data(self) -> Tuple[np.ndarray, np.ndarray]:
+    def load_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Load and split data into training and validation sets"""
         
         use_midihum = self.config.model.use_midihum_features
         
@@ -605,23 +613,37 @@ class YQXSystem:
         print(f"Loaded {len(note_pairs)} score-performance pairs")
 
         # Log dataset info
-        # wandb.log({"dataset_size": len(note_pairs)})
+        wandb.log({"dataset_size": len(note_pairs)})
         
         context_features = np.vstack(context_features)
         targets = np.vstack(targets)
         print(f"Total features shape: {context_features.shape}, Total targets shape: {targets.shape}")
 
-        return context_features, targets
+        # 90% train, 10% validation
+        n_samples = context_features.shape[0]
+        n_train = int(0.9 * n_samples)
+        
+        np.random.seed(42)
+        indices = np.random.permutation(n_samples)
+        
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:]
+        
+        train_features = context_features[train_indices]
+        train_targets = targets[train_indices]
+        val_features = context_features[val_indices]
+        val_targets = targets[val_indices]
+        
+        print(f"Train set: {train_features.shape[0]} samples")
+        print(f"Validation set: {val_features.shape[0]} samples")
+
+        return train_features, train_targets, val_features, val_targets
     
     def train(self):
         """Train the YQX system"""
-        # Initialize wandb
-        wandb.init(
-            project="yqx-expressive-performance",
-            config=dict(self.config),
-            name=self._generate_model_identifier(self.config)
-        )
         
+        t0 = time.time()
+
         # Train model (model-agnostic interface)
         train_kwargs = {}
         if self.config.model.type == "bvae":
@@ -633,12 +655,18 @@ class YQXSystem:
             train_kwargs['epochs'] = flow_config.get('epochs', 100)
             train_kwargs['batch_size'] = flow_config.get('batch_size', 32)
         
-        # filter out the data with nan in context_features 
-        nan_mask = np.isnan(self.context_features).any(axis=1)
-        self.context_features = self.context_features[~nan_mask]
-        self.targets = self.targets[~nan_mask]
+        # filter out the data with nan in train_features 
+        nan_mask = np.isnan(self.train_features).any(axis=1)
+        self.train_features = self.train_features[~nan_mask]
+        self.train_targets = self.train_targets[~nan_mask]
+        
+        # filter out the data with nan in val_features
+        val_nan_mask = np.isnan(self.val_features).any(axis=1)
+        self.val_features = self.val_features[~val_nan_mask]
+        self.val_targets = self.val_targets[~val_nan_mask]
 
-        self.model.train(self.context_features, self.targets, **train_kwargs)
+        self.model.train(self.train_features, self.train_targets, 
+                        val_features=self.val_features, val_targets=self.val_targets, **train_kwargs)
         
         print(f"Training time: {time.time() - t0} seconds")
         

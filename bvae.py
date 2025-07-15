@@ -271,6 +271,7 @@ class BVAEExpressiveModel:
         print(summary(self.model))
     
     def train(self, context_features: np.ndarray, targets: np.ndarray,
+              val_features: np.ndarray = None, val_targets: np.ndarray = None,
               epochs: int = 1000, batch_size: int = 32):
         """Train the β-VAE model on pre-extracted features and targets"""
         print("Training β-VAE model...")
@@ -283,11 +284,26 @@ class BVAEExpressiveModel:
         targets = self.target_scaler.fit_transform(targets)
         targets = torch.tensor(targets, dtype=torch.float32, device=self.device)
         
+        # Prepare validation data if provided
+        val_context_features = None
+        val_targets_tensor = None
+        if val_features is not None and val_targets is not None:
+            print(f"Using validation set with {len(val_features)} samples")
+            val_context_features = self.context_scaler.transform(val_features)
+            val_context_features = torch.tensor(val_context_features, dtype=torch.float32, device=self.device)
+            
+            val_targets_scaled = self.target_scaler.transform(val_targets)
+            val_targets_tensor = torch.tensor(val_targets_scaled, dtype=torch.float32, device=self.device)
+        
         # Training loop
         dataset_size = len(context_features)
         num_batches = (dataset_size + batch_size - 1) // batch_size
         
         self.model.train()
+        best_loss = float('inf')
+        patience = max(10, epochs // 10)
+        patience_counter = 0
+        
         for epoch in range(epochs):
             epoch_loss = 0.0
             epoch_recon_loss = 0.0
@@ -324,22 +340,50 @@ class BVAEExpressiveModel:
             
             self.scheduler.step()
             
+            # Validation phase
+            val_loss = None
+            val_recon_loss = None
+            val_kld_loss = None
+            if val_context_features is not None and val_targets_tensor is not None:
+                self.model.eval()
+                with torch.no_grad():
+                    val_results = self.model(val_context_features, val_targets_tensor)
+                    val_loss_dict = self.model.loss_function(val_results)
+                    val_loss = val_loss_dict['loss'].item()
+                    val_recon_loss = val_loss_dict['Reconstruction_Loss'].item()
+                    val_kld_loss = val_loss_dict['KLD'].item()
+                self.model.train()
+            
             # Log to wandb
-            wandb.log({
-                "epoch": epoch ,
-                "bvae_total_loss": loss.item(),
-                "bvae_reconstruction_loss": loss_dict['Reconstruction_Loss'].item(),
-                "bvae_kld_loss": loss_dict['KLD'].item(),
-                "bvae_capacity_loss": loss_dict['Capacity_Loss'].item(),
-                "learning_rate": self.scheduler.get_last_lr()[0]
-            })
+            if val_loss is not None:
+                wandb.log({
+                    "epoch": epoch ,
+                    "bvae_total_loss": loss.item(),
+                    "bvae_reconstruction_loss": loss_dict['Reconstruction_Loss'].item(),
+                    "bvae_kld_loss": loss_dict['KLD'].item(),
+                    "bvae_capacity_loss": loss_dict['Capacity_Loss'].item(),
+                    "learning_rate": self.scheduler.get_last_lr()[0],
+                    "val_total_loss": val_loss,
+                    "val_reconstruction_loss": val_recon_loss,
+                    "val_kld_loss": val_kld_loss
+                })
+            else:
+                wandb.log({
+                    "epoch": epoch ,
+                    "bvae_total_loss": loss.item(),
+                    "bvae_reconstruction_loss": loss_dict['Reconstruction_Loss'].item(),
+                    "bvae_kld_loss": loss_dict['KLD'].item(),
+                    "bvae_capacity_loss": loss_dict['Capacity_Loss'].item(),
+                    "learning_rate": self.scheduler.get_last_lr()[0]
+                })
             
             if (epoch + 1) % 100 == 0:
                 avg_loss = epoch_loss / num_batches
                 avg_recon = epoch_recon_loss / num_batches
                 avg_kld = epoch_kld_loss / num_batches
                 lr = self.scheduler.get_last_lr()[0]
-                print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, "
+                val_str = f", Val Loss: {val_loss:.4f}" if val_loss is not None else ""
+                print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.4f}{val_str}, "
                       f"Recon: {avg_recon:.4f}, KLD: {avg_kld:.4f}, LR: {lr:.6f}")
         
         self.trained = True
