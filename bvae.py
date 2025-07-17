@@ -12,6 +12,7 @@ from audiocraft.modules.transformer import StreamingTransformerLayer, create_nor
 from audiocraft.modules.unet_transformer import UnetTransformer
 from expressivenote import ExpressiveNote
 
+from torch.cuda.amp import autocast, GradScaler
 
 class TransformerEncoder(nn.Module):
     """Transformer-based encoder for context features"""
@@ -426,6 +427,10 @@ class BVAEExpressiveModel:
             self.optimizer, T_max=1000
         )
         
+        try:
+            self.scaler = GradScaler()
+        except:
+            self.scaler = None
         print(summary(self.model))
     
     def train(self, context_features: np.ndarray, targets: np.ndarray,
@@ -436,25 +441,18 @@ class BVAEExpressiveModel:
         print(f"Training on {len(context_features)} samples")
         
         # Scale features and targets
-        context_features = self.context_scaler.fit_transform(context_features)
-        context_features = torch.tensor(context_features, dtype=torch.float32, device=self.device)
+        context_features_scaled = self.context_scaler.fit_transform(context_features)
+        targets_scaled = self.target_scaler.fit_transform(targets)
         
-        targets = self.target_scaler.fit_transform(targets)
-        targets = torch.tensor(targets, dtype=torch.float32, device=self.device)
-        
-        # Prepare validation data if provided
-        val_context_features = None
-        val_targets_tensor = None
+        val_context_features_scaled = None
+        val_targets_scaled = None
         if val_features is not None and val_targets is not None:
             print(f"Using validation set with {len(val_features)} samples")
-            val_context_features = self.context_scaler.transform(val_features)
-            val_context_features = torch.tensor(val_context_features, dtype=torch.float32, device=self.device)
-            
+            val_context_features_scaled = self.context_scaler.transform(val_features)
             val_targets_scaled = self.target_scaler.transform(val_targets)
-            val_targets_tensor = torch.tensor(val_targets_scaled, dtype=torch.float32, device=self.device)
         
         # Training loop
-        dataset_size = len(context_features)
+        dataset_size = len(context_features_scaled)
         num_batches = (dataset_size + batch_size - 1) // batch_size
         
         self.model.train()
@@ -465,6 +463,9 @@ class BVAEExpressiveModel:
         
         best_model_state = None
         
+        context_tensor = torch.from_numpy(context_features_scaled).float()
+        targets_tensor = torch.from_numpy(targets_scaled).float()
+        
         for epoch in range(epochs):
             epoch_loss = 0.0
             epoch_recon_loss = 0.0
@@ -472,32 +473,44 @@ class BVAEExpressiveModel:
             
             # Shuffle data
             perm = torch.randperm(dataset_size)
-            context_shuffled = context_features[perm]
-            targets_shuffled = targets[perm]
             
             for batch_idx in range(num_batches):
                 start_idx = batch_idx * batch_size
                 end_idx = min(start_idx + batch_size, dataset_size)
                 
-                batch_context = context_shuffled[start_idx:end_idx]
-                batch_targets = targets_shuffled[start_idx:end_idx]
+                # Get batch indices
+                batch_indices = perm[start_idx:end_idx]
                 
-                # Forward pass
-                self.optimizer.zero_grad()
-                results = self.model(batch_context, batch_targets)
-                loss_dict = self.model.loss_function(results)
+                batch_context = context_tensor[batch_indices].to(self.device, non_blocking=True)
+                batch_targets = targets_tensor[batch_indices].to(self.device, non_blocking=True)
                 
-                loss = loss_dict['loss']
-                loss.backward()
+                self.optimizer.zero_grad(set_to_none=True) 
                 
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                
-                self.optimizer.step()
+                try:
+                    with autocast():
+                        results = self.model(batch_context, batch_targets)
+                        loss_dict = self.model.loss_function(results)
+                        loss = loss_dict['loss']
+                    
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                except:
+                    results = self.model(batch_context, batch_targets)
+                    loss_dict = self.model.loss_function(results)
+                    loss = loss_dict['loss']
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    self.optimizer.step()
                 
                 epoch_loss += loss.item()
                 epoch_recon_loss += loss_dict['Reconstruction_Loss'].item()
                 epoch_kld_loss += loss_dict['KLD'].item()
+                
+                if batch_idx % 200 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             
             self.scheduler.step()
             
@@ -505,14 +518,39 @@ class BVAEExpressiveModel:
             val_loss = None
             val_recon_loss = None
             val_kld_loss = None
-            if val_context_features is not None and val_targets_tensor is not None:
+            if val_context_features_scaled is not None and val_targets_scaled is not None:
                 self.model.eval()
+                val_batch_size = min(batch_size, len(val_context_features_scaled))
+                val_num_batches = (len(val_context_features_scaled) + val_batch_size - 1) // val_batch_size
+                
+                total_val_loss = 0.0
+                total_val_recon_loss = 0.0
+                total_val_kld_loss = 0.0
+                
                 with torch.no_grad():
-                    val_results = self.model(val_context_features, val_targets_tensor)
-                    val_loss_dict = self.model.loss_function(val_results)
-                    val_loss = val_loss_dict['loss'].item()
-                    val_recon_loss = val_loss_dict['Reconstruction_Loss'].item()
-                    val_kld_loss = val_loss_dict['KLD'].item()
+                    for val_batch_idx in range(val_num_batches):
+                        val_start_idx = val_batch_idx * val_batch_size
+                        val_end_idx = min(val_start_idx + val_batch_size, len(val_context_features_scaled))
+                        
+                        val_batch_context = torch.from_numpy(
+                            val_context_features_scaled[val_start_idx:val_end_idx]
+                        ).float().to(self.device, non_blocking=True)
+                        val_batch_targets = torch.from_numpy(
+                            val_targets_scaled[val_start_idx:val_end_idx]
+                        ).float().to(self.device, non_blocking=True)
+                        
+                        val_results = self.model(val_batch_context, val_batch_targets)
+                        val_loss_dict = self.model.loss_function(val_results)
+                        
+                        total_val_loss += val_loss_dict['loss'].item()
+                        total_val_recon_loss += val_loss_dict['Reconstruction_Loss'].item()
+                        total_val_kld_loss += val_loss_dict['KLD'].item()
+                    
+                    # Average validation losses
+                    val_loss = total_val_loss / val_num_batches
+                    val_recon_loss = total_val_recon_loss / val_num_batches
+                    val_kld_loss = total_val_kld_loss / val_num_batches
+                
                 self.model.train()
             
             current_loss = val_loss if val_loss is not None else (epoch_loss / num_batches)
@@ -524,11 +562,11 @@ class BVAEExpressiveModel:
             # Log to wandb
             if val_loss is not None:
                 wandb.log({
-                    "epoch": epoch ,
-                    "bvae_total_loss": loss.item(),
-                    "bvae_reconstruction_loss": loss_dict['Reconstruction_Loss'].item(),
-                    "bvae_kld_loss": loss_dict['KLD'].item(),
-                    "bvae_capacity_loss": loss_dict['Capacity_Loss'].item(),
+                    "epoch": epoch,
+                    "bvae_total_loss": epoch_loss / num_batches,
+                    "bvae_reconstruction_loss": epoch_recon_loss / num_batches,
+                    "bvae_kld_loss": epoch_kld_loss / num_batches,
+                    "bvae_capacity_loss": (epoch_loss - epoch_recon_loss - epoch_kld_loss) / num_batches,
                     "learning_rate": self.scheduler.get_last_lr()[0],
                     "val_total_loss": val_loss,
                     "val_reconstruction_loss": val_recon_loss,
@@ -536,11 +574,11 @@ class BVAEExpressiveModel:
                 })
             else:
                 wandb.log({
-                    "epoch": epoch ,
-                    "bvae_total_loss": loss.item(),
-                    "bvae_reconstruction_loss": loss_dict['Reconstruction_Loss'].item(),
-                    "bvae_kld_loss": loss_dict['KLD'].item(),
-                    "bvae_capacity_loss": loss_dict['Capacity_Loss'].item(),
+                    "epoch": epoch,
+                    "bvae_total_loss": epoch_loss / num_batches,
+                    "bvae_reconstruction_loss": epoch_recon_loss / num_batches,
+                    "bvae_kld_loss": epoch_kld_loss / num_batches,
+                    "bvae_capacity_loss": (epoch_loss - epoch_recon_loss - epoch_kld_loss) / num_batches,
                     "learning_rate": self.scheduler.get_last_lr()[0]
                 })
             
@@ -561,42 +599,78 @@ class BVAEExpressiveModel:
         self.best_epoch = best_epoch
         self.best_loss = best_loss
     
-    def predict(self, context_features: np.ndarray, 
-                num_samples: int = 1) -> np.ndarray:
+    def predict(self, context_features: np.ndarray, num_samples: int = 1, batch_size: int = 32) -> np.ndarray:
         """Predict targets using β-VAE on pre-extracted features"""
         if not self.trained:
             raise ValueError("Model must be trained before prediction")
         
-        context_features = self.context_scaler.transform(context_features)
-        context_features = torch.tensor(context_features, dtype=torch.float32, device=self.device)
+        # Scale features
+        context_features_scaled = self.context_scaler.transform(context_features)
+        
+        context_tensor = torch.from_numpy(context_features_scaled).float()
         
         # Generate predictions
+        num_batches = (len(context_features_scaled) + batch_size - 1) // batch_size
+        
+        all_predictions = []
+        
         self.model.eval()
         with torch.no_grad():
-            predictions = self.model.sample(context_features, num_samples=num_samples)
-            
-            if num_samples > 1:
-                # Take mean across samples
-                predictions = predictions.mean(dim=1)
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(context_features_scaled))
+                
+                batch_context = context_tensor[start_idx:end_idx].to(self.device, non_blocking=True)
+                
+                batch_predictions = self.model.sample(batch_context, num_samples=num_samples)
+                
+                if num_samples > 1:
+                    batch_predictions = batch_predictions.mean(dim=1)
+                
+                batch_predictions = batch_predictions.cpu().numpy()
+                all_predictions.append(batch_predictions)
+                
+                if batch_idx % 100 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        
+        predictions = np.vstack(all_predictions)
         
         # Inverse transform
-        predictions = predictions.cpu().numpy()
         predictions = self.target_scaler.inverse_transform(predictions)
         
         return predictions
     
-    def get_latent_representation(self, context_features: np.ndarray) -> np.ndarray:
+    def get_latent_representation(self, context_features: np.ndarray, batch_size: int = 32) -> np.ndarray:
         """Get latent representations for analysis"""
         if not self.trained:
             raise ValueError("Model must be trained before encoding")
         
-        context_features = self.context_scaler.transform(context_features)
-        context_features = torch.tensor(context_features, dtype=torch.float32, device=self.device)
+        context_features_scaled = self.context_scaler.transform(context_features)
+        
+        context_tensor = torch.from_numpy(context_features_scaled).float()
+        
+        num_batches = (len(context_features_scaled) + batch_size - 1) // batch_size
+        
+        all_latent_repr = []
         
         self.model.eval()
         with torch.no_grad():
-            mu, log_var = self.model.encode(context_features)
-            return mu.cpu().numpy()
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(context_features_scaled))
+                
+                batch_context = context_tensor[start_idx:end_idx].to(self.device, non_blocking=True)
+                
+                mu, _ = self.model.encode(batch_context)
+                batch_latent = mu.cpu().numpy()
+                all_latent_repr.append(batch_latent)
+                
+                if batch_idx % 100 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        
+        latent_repr = np.vstack(all_latent_repr)
+        
+        return latent_repr
     
     def save(self, filepath: str, feature_scaler=None, save_best: bool = True):
         """Save trained β-VAE model"""

@@ -17,7 +17,7 @@ data:
 
 # Model configuration
 model:
-  type: "flow"  # Options: "gmm", "flow", "bvae"
+  type: "xgboost"  # Options: "gmm", "flow", "bvae", "xgboost"
   use_midihum_features: false
   
   # Model-specific parameters
@@ -45,6 +45,17 @@ model:
     epochs: 1000
     batch_size: 32
 
+  xgboost:
+    learning_rate: 0.05
+    max_depth: 7
+    n_estimators: 1700
+    subsample: 0.9
+    colsample_bytree: 0.6
+    reg_alpha: 0.2
+    reg_lambda: 0.4
+    random_state: 42
+    n_jobs: 8
+
   device: "cpu"  # Options: "cpu", "cuda:0", etc.
 
 # Training configuration
@@ -62,7 +73,7 @@ test:
 render:
   enabled: false
   input_score: "${data.vienna4x22_dir}/musicxml/Chopin_op10_no3.musicxml"
-  output_midi: "${output.output_dir}/Chopin_op10_no3_flow.mid"
+  output_midi: "${output.output_dir}/Chopin_op10_no3_xgboost.mid"
   initial_tempo: 120
 
 # Output configuration

@@ -26,6 +26,7 @@ from expressivenote import ExpressiveNote
 from gmm import BayesianExpressiveModel
 from bvae import BVAEExpressiveModel
 from flow import FMExpressiveModel
+from xgboost_model import XGBoostExpressiveModel
 from features import FeatureExtractor
 
 
@@ -157,6 +158,23 @@ class YQXSystem:
                 learning_rate=bvae_config.get('learning_rate', 0.001),
                 device= device
             )
+        elif config.model.type == "xgboost":
+            xgboost_config = config.model.xgboost
+            self.model = XGBoostExpressiveModel(
+                features_dim=self.train_features.shape[1],
+                target_dim=self.train_targets.shape[1],
+                use_midihum=config.model.use_midihum_features,
+                learning_rate=xgboost_config.get('learning_rate', 0.05),
+                max_depth=xgboost_config.get('max_depth', 7),
+                n_estimators=xgboost_config.get('n_estimators', 1000),
+                subsample=xgboost_config.get('subsample', 0.9),
+                colsample_bytree=xgboost_config.get('colsample_bytree', 0.6),
+                reg_alpha=xgboost_config.get('reg_alpha', 0.2),
+                reg_lambda=xgboost_config.get('reg_lambda', 0.4),
+                n_jobs=xgboost_config.get('n_jobs', 1),
+                device=xgboost_config.get('device', 'cpu'),
+                tree_method=xgboost_config.get('tree_method', 'auto')
+            )
             
         else:
             raise ValueError(f"Unknown model type: {config.model.type}")
@@ -197,6 +215,10 @@ class YQXSystem:
                 parts.append(f"nl{config.model.bvae.get('num_layers', 2)}")
                 parts.append(f"b{config.model.bvae.get('beta', 4.0)}")
                 parts.append(f"g{config.model.bvae.get('gamma', 10.0)}")
+            elif config.model.type == "xgboost":
+                parts.append(f"md{config.model.xgboost.get('max_depth', 7)}")
+                parts.append(f"ne{config.model.xgboost.get('n_estimators', 1700)}")
+                parts.append(f"lr{config.model.xgboost.get('learning_rate', 0.05)}")
         
         # Add midihum features flag
         if config.model.use_midihum_features:
@@ -647,7 +669,7 @@ class YQXSystem:
         """Train the YQX system"""
         
         t0 = time.time()
-
+        
         # Train model (model-agnostic interface)
         train_kwargs = {}
         if self.config.model.type == "bvae":
@@ -658,6 +680,10 @@ class YQXSystem:
             flow_config = self.config.model.flow
             train_kwargs['epochs'] = flow_config.get('epochs', 100)
             train_kwargs['batch_size'] = flow_config.get('batch_size', 32)
+        elif self.config.model.type == "xgboost":
+            # keeps it for the interface consistent
+            train_kwargs['epochs'] = 1
+            train_kwargs['batch_size'] = None
         
         # filter out the data with nan in train_features 
         nan_mask = np.isnan(self.train_features).any(axis=1)
