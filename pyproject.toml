@@ -8,37 +8,31 @@ dependencies = [
     # Core ML/DL libraries
     "torch>=2.1.0",
     "torchdiffeq>=0.2.3",
-    
     # Scientific computing
-    "numpy>=1.21.0,<2.0.0",  # Keep numpy 1.x for better compatibility
-    "pandas>=1.3.0", 
+    "numpy>=1.21.0,<2.0.0", # Keep numpy 1.x for better compatibility
+    "pandas>=1.3.0",
     "scikit-learn>=1.0.0",
     "matplotlib>=3.5.0",
-    
     # Configuration management
     "omegaconf>=2.3.0",
-    
     # MIDI/music processing
     "partitura>=1.4.0",
     "mido>=1.3.0",
-    
     # CLI and utilities
     "click>=8.0.0",
     "tqdm>=4.64.0",
-    
     # ML/DL utilities
     "wandb>=0.13.0",
     "torchinfo>=1.7.0",
     "torchcfm>=1.0.0",
-    
     # Development and testing
     "pytest>=7.0.0",
     "jupyter>=1.0.0",
-    
     # Build dependencies
     "setuptools>=50.0.0",
     "wheel>=0.36.0",
     "Cython>=0.29.0",
+    "audiocraft",
 ]
 
 [project.optional-dependencies]
@@ -54,4 +48,7 @@ dev = [
     "flake8>=4.0.0",
     "mypy>=0.910",
 ]
+
+[tool.uv.sources]
+audiocraft = { git = "https://github.com/facebookresearch/audiocraft.git" }
 

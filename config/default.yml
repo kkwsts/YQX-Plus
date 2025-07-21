@@ -5,19 +5,20 @@ defaults:
 
 # Data paths
 data:
-  vienna4x22_dir: "/homes/hz009/Research/Datasets/vienna4x22"
+  vienna4x22_dir: "/data/scratch/acw630/vienna4x22"
   # vienna4x22_dir: "/Users/kkwsts/Datasets/vienna4x22"
   use_vienna4x22: true
-  asap_dir: "/import/c4dm-datasets-ext/asap-dataset/"
+  asap_dir: "/data/scratch/acw630/asap-dataset-alignment"
   # asap_dir: "/Users/kkwsts/Datasets/asap-dataset-alignment"
   use_asap: false
-  atepp_dir: "/homes/hz009/Research/Datasets/ATEPP-1.1"
-  atepp_meta_csv: "/homes/hz009/Research/Datasets/ATEPP-1.1/ATEPP-metadata-1.3.csv"
+  atepp_dir: "/data/scratch/acw630/ATEPP-1.1"
+  atepp_meta_csv: "/data/scratch/acw630/ATEPP-1.1/ATEPP-metadata-1.3.csv"
   use_atepp: false
 
 # Model configuration
 model:
   type: "xgboost"  # Options: "gmm", "flow", "bvae", "xgboost"
+  feature_experiment: "full_context"  # Options: "short_context", "long_context", "full_context"
   use_midihum_features: false
   
   # Model-specific parameters
@@ -26,11 +27,11 @@ model:
     random_state: 42
     
   flow:
-    hidden_dim: 192
+    hidden_dim: 128
     num_heads: 8
     num_layers: 6
-    flow_matcher_type: "standard" # "optimal_transport"
-    epochs: 100
+    flow_matcher_type: "linear" # "optimal_transport"
+    epochs: 1000
     batch_size: 32
     sigma: 0.01
     

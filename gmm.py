@@ -7,7 +7,7 @@ import pickle
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
-import hook
+# import hook
 import warnings
 
 from expressivenote import ExpressiveNote

@@ -11,9 +11,9 @@ from expressivenote import *
 from torchinfo import summary
 from torchdiffeq import odeint
 import audiocraft
-from audiocraft.modules.streaming import StreamingModule
-from audiocraft.modules.transformer import StreamingTransformerLayer, create_norm_fn
-from audiocraft.modules.unet_transformer import UnetTransformer
+from audiocraft.audiocraft.modules.streaming import StreamingModule
+from audiocraft.audiocraft.modules.transformer import StreamingTransformerLayer, create_norm_fn
+from audiocraft.audiocraft.modules.unet_transformer import UnetTransformer
 
 from torchcfm.conditional_flow_matching import ConditionalFlowMatcher
 from torchcfm.conditional_flow_matching import ExactOptimalTransportConditionalFlowMatcher
@@ -242,7 +242,7 @@ class FMExpressiveModel(StreamingModule):
                  target_dim: int = 4, 
                  hidden_dim: int = 128, 
                  use_midihum: bool = False, 
-                 flow_matcher_type: str = "standard", 
+                 flow_matcher_type: str = "linear", 
                  sigma: float = 0.01, 
                  device: str = "cpu", 
                  num_heads: int = 4, 
@@ -478,8 +478,50 @@ class FMExpressiveModel(StreamingModule):
                 patience_counter = 0
                 # Save best model state
                 best_model_state = self.state_dict().copy()
+                
+                # Save best model immediately when found
+                if hasattr(self, 'save_path'):
+                    base_path = self.save_path.rsplit('.', 1)[0] 
+                    extension = self.save_path.rsplit('.', 1)[1] if '.' in self.save_path else 'pth'
+                    best_filepath = f"{base_path}_best.{extension}"
+                    
+                    best_save_dict = {
+                        'model_state_dict': best_model_state,
+                        'features_dim': self.features_dim,  
+                        'target_dim': self.target_dim,
+                        'hidden_dim': self.hidden_dim,
+                        'use_midihum': self.use_midihum,
+                        'device': str(self.device),
+                        'scaler': self.scaler,
+                        'target_scaler': self.target_scaler,
+                        'feature_scaler': getattr(self, 'feature_scaler', None),
+                        'model_type': 'best',
+                        'best_epoch': best_epoch,
+                        'best_loss': best_loss,
+                    }
+                    torch.save(best_save_dict, best_filepath)
+                    print(f"New best model saved to {best_filepath} (epoch {epoch + 1}, loss: {best_loss:.6f})")
             else:
                 patience_counter += 1
+            
+            # Save model every epoch (replace previous save)
+            if hasattr(self, 'save_path'):
+                # Save current model state
+                current_model_data = {
+                    'model_state_dict': self.state_dict(),
+                    'features_dim': self.features_dim,  
+                    'target_dim': self.target_dim,
+                    'hidden_dim': self.hidden_dim,
+                    'use_midihum': self.use_midihum,
+                    'device': str(self.device),
+                    'scaler': self.scaler,
+                    'target_scaler': self.target_scaler,
+                    'feature_scaler': getattr(self, 'feature_scaler', None),
+                    'model_type': 'current',
+                    'current_epoch': epoch,
+                    'current_loss': current_loss,
+                }
+                torch.save(current_model_data, self.save_path)
             
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch}")
@@ -638,6 +680,9 @@ class FMExpressiveModel(StreamingModule):
     def save(self, filepath: str, feature_scaler=None, save_best: bool = True):
         if feature_scaler is not None:
             self.feature_scaler = feature_scaler
+        
+        # Set save path for epoch-by-epoch saving
+        self.save_path = filepath
         
         save_dict = {
             'model_state_dict': self.state_dict(),

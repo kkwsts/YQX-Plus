@@ -4,15 +4,233 @@ from typing import List, Dict, Optional, Tuple
 import pandas as pd
 import pickle
 from sklearn.preprocessing import StandardScaler
+import json
+import os
 
 from expressivenote import ExpressiveNote
 from midihum_chord_identifier import chord_attributes
 
 
+class FeatureExperimentConfig:
+    """Configuration for feature experiment design"""
+    
+    # Feature dimensions by musical aspect
+    FEATURE_DIMENSIONS = {
+        'pitch': {
+            'context_short': [
+                'pitch', 'pitch_class', 'octave',
+                'pitch_interval_next', 'pitch_interval_prev',
+                'pitch_relative_to_voice_range', 'pitch_relative_to_piece_range'
+            ],
+            'context_medium': [
+                'pitch_interval_2next', 'pitch_interval_2prev',
+                'interval_direction', 'interval_direction_2step'
+            ],
+            'context_long': [
+                'pitch_interval_3next', 'pitch_interval_3prev',
+                'interval_direction_3step', 'melodic_contour_3step',
+                'melodic_contour_5step'
+            ],
+            'context_extended': [
+                'time_since_pitch_class', 'time_since_octave',
+                'log_time_since_pitch_class', 'log_time_since_octave',
+                'interval_from_pressed', 'interval_from_released',
+                'abs_interval_from_pressed', 'abs_interval_from_released',
+                'log_abs_interval_from_pressed', 'log_abs_interval_from_released'
+            ]
+        },
+        'voice': {
+            'context_short': [
+                'voice_layer', 'voice_layer_relative',
+                'notes_above_count', 'notes_below_count',
+                'voice_density_at_onset', 'voice_density_ratio'
+            ],
+            'context_medium': [
+                'notes_above_avg_pitch', 'notes_below_avg_pitch',
+                'notes_above_max_pitch', 'notes_below_min_pitch'
+            ],
+            'context_long': [
+                'interval_to_highest_voice', 'interval_to_lowest_voice',
+                'interval_to_voice_center'
+            ],
+            'context_extended': [
+                'num_played_notes_pressed', 'avg_pitch_pressed',
+                'chord_character_pressed', 'chord_size_pressed',
+                'chord_character', 'chord_size'
+            ]
+        },
+        'rhythm': {
+            'context_short': [
+                'duration_beat', 'duration_ratio_next', 'duration_ratio_prev',
+                'beat_position_in_measure', 'is_on_beat', 'is_on_downbeat'
+            ],
+            'context_medium': [
+                'rhythmic_context', 'rhythmic_pattern_3step',
+                'duration_relative_to_voice_avg', 'duration_relative_to_piece_avg'
+            ],
+            'context_long': [
+                'rhythmic_pattern_5step', 'duration_rank_in_voice',
+                'duration_rank_in_piece'
+            ],
+            'context_extended': [
+                'time_since_last_pressed', 'time_since_last_released',
+                'log_time_since_last_pressed', 'log_time_since_last_released',
+                'time_since_follows_pause', 'log_time_since_follows_pause'
+            ]
+        },
+        'phrase': {
+            'context_short': [
+                'position_in_phrase', 'phrase_length'
+            ],
+            'context_medium': [
+                'ir_label', 'ir_closure'
+            ],
+            'context_extended': [
+                'time_since_chord_character', 'time_since_chord_size',
+                'log_time_since_chord_character', 'log_time_since_chord_size'
+            ]
+        },
+        'technical_indicators': {
+            'context_extended': [
+                # Moving averages for pitch (all windows)
+                'pitch_sma_mean_15', 'pitch_sma_min_15', 'pitch_sma_max_15', 'pitch_sma_std_15',
+                'pitch_sma_mean_30', 'pitch_sma_min_30', 'pitch_sma_max_30', 'pitch_sma_std_30',
+                'pitch_sma_mean_75', 'pitch_sma_min_75', 'pitch_sma_max_75', 'pitch_sma_std_75',
+                'pitch_fwd_sma_mean_15', 'pitch_fwd_sma_min_15', 'pitch_fwd_sma_max_15', 'pitch_fwd_sma_std_15',
+                'pitch_fwd_sma_mean_30', 'pitch_fwd_sma_min_30', 'pitch_fwd_sma_max_30', 'pitch_fwd_sma_std_30',
+                'pitch_fwd_sma_mean_75', 'pitch_fwd_sma_min_75', 'pitch_fwd_sma_max_75', 'pitch_fwd_sma_std_75',
+                'pitch_sma_mean_15_oscillator', 'pitch_sma_min_15_oscillator', 'pitch_sma_max_15_oscillator', 'pitch_sma_std_15_oscillator',
+                'pitch_sma_mean_30_oscillator', 'pitch_sma_min_30_oscillator', 'pitch_sma_max_30_oscillator', 'pitch_sma_std_30_oscillator',
+                'pitch_sma_mean_75_oscillator', 'pitch_sma_min_75_oscillator', 'pitch_sma_max_75_oscillator', 'pitch_sma_std_75_oscillator',
+                'pitch_fwd_sma_mean_15_oscillator', 'pitch_fwd_sma_min_15_oscillator', 'pitch_fwd_sma_max_15_oscillator', 'pitch_fwd_sma_std_15_oscillator',
+                'pitch_fwd_sma_mean_30_oscillator', 'pitch_fwd_sma_min_30_oscillator', 'pitch_fwd_sma_max_30_oscillator', 'pitch_fwd_sma_std_30_oscillator',
+                'pitch_fwd_sma_mean_75_oscillator', 'pitch_fwd_sma_min_75_oscillator', 'pitch_fwd_sma_max_75_oscillator', 'pitch_fwd_sma_std_75_oscillator',
+                
+                # Moving averages for log_sustain (all windows)
+                'log_sustain_sma_mean_15', 'log_sustain_sma_min_15', 'log_sustain_sma_max_15', 'log_sustain_sma_std_15',
+                'log_sustain_sma_mean_30', 'log_sustain_sma_min_30', 'log_sustain_sma_max_30', 'log_sustain_sma_std_30',
+                'log_sustain_sma_mean_75', 'log_sustain_sma_min_75', 'log_sustain_sma_max_75', 'log_sustain_sma_std_75',
+                'log_sustain_fwd_sma_mean_15', 'log_sustain_fwd_sma_min_15', 'log_sustain_fwd_sma_max_15', 'log_sustain_fwd_sma_std_15',
+                'log_sustain_fwd_sma_mean_30', 'log_sustain_fwd_sma_min_30', 'log_sustain_fwd_sma_max_30', 'log_sustain_fwd_sma_std_30',
+                'log_sustain_fwd_sma_mean_75', 'log_sustain_fwd_sma_min_75', 'log_sustain_fwd_sma_max_75', 'log_sustain_fwd_sma_std_75',
+                'log_sustain_sma_mean_15_oscillator', 'log_sustain_sma_min_15_oscillator', 'log_sustain_sma_max_15_oscillator', 'log_sustain_sma_std_15_oscillator',
+                'log_sustain_sma_mean_30_oscillator', 'log_sustain_sma_min_30_oscillator', 'log_sustain_sma_max_30_oscillator', 'log_sustain_sma_std_30_oscillator',
+                'log_sustain_sma_mean_75_oscillator', 'log_sustain_sma_min_75_oscillator', 'log_sustain_sma_max_75_oscillator', 'log_sustain_sma_std_75_oscillator',
+                'log_sustain_fwd_sma_mean_15_oscillator', 'log_sustain_fwd_sma_min_15_oscillator', 'log_sustain_fwd_sma_max_15_oscillator', 'log_sustain_fwd_sma_std_15_oscillator',
+                'log_sustain_fwd_sma_mean_30_oscillator', 'log_sustain_fwd_sma_min_30_oscillator', 'log_sustain_fwd_sma_max_30_oscillator', 'log_sustain_fwd_sma_std_30_oscillator',
+                'log_sustain_fwd_sma_mean_75_oscillator', 'log_sustain_fwd_sma_min_75_oscillator', 'log_sustain_fwd_sma_max_75_oscillator', 'log_sustain_fwd_sma_std_75_oscillator',
+                
+                # Technical indicators for all targets
+                'pitch_tenkan_sen', 'pitch_kijun_sen', 'pitch_senkou_span_a', 'pitch_senkou_span_b', 'pitch_chikou_span', 'pitch_cloud_is_green',
+                'pitch_relative_to_tenkan_sen', 'pitch_relative_to_kijun_sen', 'pitch_tenkan_sen_relative_to_kijun_sen', 'pitch_relative_to_chikou_span', 'pitch_relative_to_cloud',
+                'log_sustain_tenkan_sen', 'log_sustain_kijun_sen', 'log_sustain_senkou_span_a', 'log_sustain_senkou_span_b', 'log_sustain_chikou_span', 'log_sustain_cloud_is_green',
+                'log_sustain_relative_to_tenkan_sen', 'log_sustain_relative_to_kijun_sen', 'log_sustain_tenkan_sen_relative_to_kijun_sen', 'log_sustain_relative_to_chikou_span', 'log_sustain_relative_to_cloud',
+                'interval_from_released_tenkan_sen', 'interval_from_released_kijun_sen', 'interval_from_released_senkou_span_a', 'interval_from_released_senkou_span_b', 'interval_from_released_chikou_span', 'interval_from_released_cloud_is_green',
+                'interval_from_released_relative_to_tenkan_sen', 'interval_from_released_relative_to_kijun_sen', 'interval_from_released_tenkan_sen_relative_to_kijun_sen', 'interval_from_released_relative_to_chikou_span', 'interval_from_released_relative_to_cloud',
+                'interval_from_pressed_tenkan_sen', 'interval_from_pressed_kijun_sen', 'interval_from_pressed_senkou_span_a', 'interval_from_pressed_senkou_span_b', 'interval_from_pressed_chikou_span', 'interval_from_pressed_cloud_is_green',
+                'interval_from_pressed_relative_to_tenkan_sen', 'interval_from_pressed_relative_to_kijun_sen', 'interval_from_pressed_tenkan_sen_relative_to_kijun_sen', 'interval_from_pressed_relative_to_chikou_span', 'interval_from_pressed_relative_to_cloud'
+            ]
+        }
+    }
+    
+    # Categorical features by dimension
+    CATEGORICAL_FEATURES = {
+        'rhythm': [
+            'rhythmic_context', 'rhythmic_pattern_3step', 'rhythmic_pattern_5step'
+        ],
+        'pitch': [
+            'interval_direction', 'interval_direction_2step', 'interval_direction_3step',
+            'melodic_contour_3step', 'melodic_contour_5step'
+        ],
+        'phrase': [
+            'ir_label'
+        ],
+        'voice': [
+            'chord_character_pressed', 'chord_size_pressed', 'chord_character', 'chord_size'
+        ]
+    }
+    
+    # Predefined experiment configurations
+    EXPERIMENT_CONFIGS = {
+        'short_context': {
+            'description': 'Short context features only',
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase'],
+            'context_levels': ['context_short'],
+            'use_midihum': False
+        },
+        'long_context': {
+            'description': 'Short + medium + long context features',
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase'],
+            'context_levels': ['context_short', 'context_medium', 'context_long'],
+            'use_midihum': False
+        },
+        'full_context': {
+            'description': 'All context levels (short + medium + long + extended)',
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'technical_indicators'],
+            'context_levels': ['context_short', 'context_medium', 'context_long', 'context_extended'],
+            'use_midihum': True
+        }
+    }
+    
+    @classmethod
+    def get_feature_list(cls, config_name: str) -> List[str]:
+        """Get list of features for a given experiment configuration"""
+        if config_name not in cls.EXPERIMENT_CONFIGS:
+            raise ValueError(f"Unknown experiment config: {config_name}")
+        
+        config = cls.EXPERIMENT_CONFIGS[config_name]
+        features = []
+        
+        for dimension in config['dimensions']:
+            if dimension in cls.FEATURE_DIMENSIONS:
+                for level in config['context_levels']:
+                    if level in cls.FEATURE_DIMENSIONS[dimension]:
+                        features.extend(cls.FEATURE_DIMENSIONS[dimension][level])
+        
+        return list(set(features))  # Remove duplicates
+    
+    @classmethod
+    def get_categorical_features(cls, config_name: str) -> List[str]:
+        """Get list of categorical features for a given experiment configuration"""
+        if config_name not in cls.EXPERIMENT_CONFIGS:
+            raise ValueError(f"Unknown experiment config: {config_name}")
+        
+        config = cls.EXPERIMENT_CONFIGS[config_name]
+        categorical = []
+        
+        for dimension in config['dimensions']:
+            if dimension in cls.CATEGORICAL_FEATURES:
+                categorical.extend(cls.CATEGORICAL_FEATURES[dimension])
+        
+        return list(set(categorical))  # Remove duplicates
+    
+    @classmethod
+    def get_experiment_info(cls, config_name: str) -> Dict:
+        """Get experiment information for a given configuration"""
+        if config_name not in cls.EXPERIMENT_CONFIGS:
+            raise ValueError(f"Unknown experiment config: {config_name}")
+        
+        config = cls.EXPERIMENT_CONFIGS[config_name]
+        features = cls.get_feature_list(config_name)
+        categorical = cls.get_categorical_features(config_name)
+        
+        return {
+            'name': config_name,
+            'description': config['description'],
+            'dimensions': config['dimensions'],
+            'context_levels': config['context_levels'],
+            'use_midihum': config['use_midihum'],
+            'feature_count': len(features),
+            'categorical_count': len(categorical),
+            'continuous_count': len(features) - len(categorical)
+        }
+
+
 class FeatureExtractor:
     """Extract musical context features from note arrays"""
     
-    def __init__(self):
+    def __init__(self, experiment_config: str = 'full_context'):
+        self.experiment_config = experiment_config
         self.ir_categories = [
             'Process', 'Reversal', 'Registral_Return', 'Intervallic_Duplication'
         ]
@@ -54,14 +272,127 @@ class FeatureExtractor:
             })
         
         self.feature_scaler = None
+        
+        # Get feature configuration
+        self.feature_list = FeatureExperimentConfig.get_feature_list(experiment_config)
+        self.categorical_features = FeatureExperimentConfig.get_categorical_features(experiment_config)
+        self.experiment_info = FeatureExperimentConfig.get_experiment_info(experiment_config)
     
-    def encode_features(self, notes: List[ExpressiveNote], fit: bool = False, use_midihum: bool = False) -> np.ndarray:
-        """Encode all features (both categorical and continuous) to numerical arrays
+    def get_cache_filename(self, piece_name: str) -> str:
+        """Generate cache filename based on experiment configuration"""
+        return f"features_{piece_name}_{self.experiment_config}.pkl"
+    
+    def save_experiment_config(self, save_dir: str):
+        """Save experiment configuration to JSON file"""
+        config_file = os.path.join(save_dir, f"experiment_config_{self.experiment_config}.json")
+        with open(config_file, 'w') as f:
+            json.dump(self.experiment_info, f, indent=2)
+    
+
+    
+    def print_experiment_table(self):
+        """Print experiment table for paper presentation"""
+        print("=" * 80)
+        print("FEATURE EXPERIMENT DESIGN TABLE")
+        print("=" * 80)
+        
+        # Print all available configurations
+        for config_name in FeatureExperimentConfig.EXPERIMENT_CONFIGS.keys():
+            info = FeatureExperimentConfig.get_experiment_info(config_name)
+            print(f"\n{info['name'].upper()}: {info['description']}")
+            print(f"  Dimensions: {', '.join(info['dimensions'])}")
+            print(f"  Context Levels: {', '.join(info['context_levels'])}")
+            print(f"  Extended Context: {'Yes' if info['use_midihum'] else 'No'}")
+            print(f"  Total Features: {info['feature_count']} (Categorical: {info['categorical_count']}, Continuous: {info['continuous_count']})")
+        
+        print("\n" + "=" * 80)
+        print("FEATURE DIMENSIONS BREAKDOWN")
+        print("=" * 80)
+        
+        for dimension, levels in FeatureExperimentConfig.FEATURE_DIMENSIONS.items():
+            print(f"\n{dimension.upper()}:")
+            for level, features in levels.items():
+                print(f"  {level}: {len(features)} features")
+                if len(features) <= 5:  # Show feature names if few
+                    print(f"    {', '.join(features)}")
+                else:
+                    print(f"    {', '.join(features[:3])}... (+{len(features)-3} more)")
+        
+        print("\n" + "=" * 80)
+        print("CURRENT EXPERIMENT CONFIGURATION")
+        print("=" * 80)
+        print(f"Config: {self.experiment_config}")
+        print(f"Description: {self.experiment_info['description']}")
+        print(f"Feature Count: {self.experiment_info['feature_count']}")
+        print(f"Dimensions: {', '.join(self.experiment_info['dimensions'])}")
+        print(f"Context Levels: {', '.join(self.experiment_info['context_levels'])}")
+        print(f"Extended Context: {'Yes' if self.experiment_info['use_midihum'] else 'No'}")
+    
+    def get_experiment_summary(self) -> Dict:
+        """Get summary of current experiment configuration for logging"""
+        return {
+            'config_name': self.experiment_config,
+            'description': self.experiment_info['description'],
+            'feature_count': self.experiment_info['feature_count'],
+            'dimensions': self.experiment_info['dimensions'],
+            'context_levels': self.experiment_info['context_levels'],
+            'use_midihum': self.experiment_info['use_midihum'],
+            'feature_list': self.feature_list
+        }
+    
+
+    
+    def get_feature_statistics(self, notes: List[ExpressiveNote]) -> Dict:
+        """Get statistics about features for analysis"""
+        if not notes:
+            return {}
+        
+        stats = {
+            'total_notes': len(notes),
+            'feature_counts': {},
+            'missing_values': {},
+            'feature_ranges': {}
+        }
+        
+        # Analyze each feature
+        for feature_name in self.feature_list:
+            values = []
+            missing_count = 0
+            
+            for note in notes:
+                value = getattr(note, feature_name, None)
+                if value is not None:
+                    values.append(value)
+                else:
+                    missing_count += 1
+            
+            stats['feature_counts'][feature_name] = len(values)
+            stats['missing_values'][feature_name] = missing_count
+            
+            if values:
+                if isinstance(values[0], (int, float)):
+                    stats['feature_ranges'][feature_name] = {
+                        'min': min(values),
+                        'max': max(values),
+                        'mean': np.mean(values),
+                        'std': np.std(values)
+                    }
+                else:
+                    # For categorical features
+                    unique_values = list(set(values))
+                    stats['feature_ranges'][feature_name] = {
+                        'unique_count': len(unique_values),
+                        'unique_values': unique_values[:10]  # First 10 unique values
+                    }
+        
+        return stats
+    
+    def encode_features(self, notes: List[ExpressiveNote], fit: bool = False) -> np.ndarray:
+        """Encode features based on current experiment configuration
         
         Args:
             notes: List of ExpressiveNote objects
             fit: Whether to fit the encoders and scaler (True for training, False for inference)
-            use_midihum: Whether to include additional midihum features
             
         Returns:
             Numpy array of encoded features
@@ -69,192 +400,32 @@ class FeatureExtractor:
         categorical_features = []
         continuous_features = []
         
-        # Define base categorical features
-        BASE_CATEGORICAL_FEATURES = [
-            'rhythmic_context',
-            'rhythmic_pattern_3step',
-            'rhythmic_pattern_5step',
-            'interval_direction',
-            'interval_direction_2step',
-            'interval_direction_3step',
-            'melodic_contour_3step',
-            'melodic_contour_5step',
-            'ir_label'
-        ]
-        
-        # Define midihum categorical features
-        MIDIHUM_CATEGORICAL_FEATURES = [
-            'chord_character_pressed',
-            'chord_size_pressed',
-            'chord_character',
-            'chord_size'
-        ]
-        
-        # Define base continuous features
-        BASE_FEATURES = [
-            # Basic features
-            'pitch',
-            'onset_beat',
-            'duration_beat',
-            
-            # Pitch features
-            'pitch_class',
-            'octave',
-            'pitch_interval_next',
-            'pitch_interval_prev',
-            'pitch_interval_2next',
-            'pitch_interval_2prev',
-            'pitch_interval_3next',
-            'pitch_interval_3prev',
-            'pitch_relative_to_voice_range',
-            'pitch_relative_to_piece_range',
-            
-            # Voice features
-            'voice_layer',
-            'voice_layer_relative',
-            'notes_above_count',
-            'notes_below_count',
-            'notes_above_avg_pitch',
-            'notes_below_avg_pitch',
-            'notes_above_max_pitch',
-            'notes_below_min_pitch',
-            'voice_density_at_onset',
-            'voice_density_ratio',
-            'interval_to_highest_voice',
-            'interval_to_lowest_voice',
-            'interval_to_voice_center',
-            
-            # Rhythmic features
-            'duration_ratio_next',
-            'duration_ratio_prev',
-            'beat_position_in_measure',
-            'beat_position_in_phrase',
-            'duration_relative_to_voice_avg',
-            'duration_relative_to_piece_avg',
-            'duration_rank_in_voice',
-            'duration_rank_in_piece',
-            
-            # Phrase features
-            'position_in_phrase',
-            'phrase_length',
-            'ir_closure'
-        ]
-        
-        # Define midihum basic features
-        MIDIHUM_BASIC_FEATURES = [
-            'pitch_class',
-            'octave'
-        ]
-        
-        # Define midihum time features
-        MIDIHUM_TIME_FEATURES = [
-            'time_since_last_pressed',
-            'time_since_last_released',
-            'time_since_pitch_class',
-            'time_since_octave',
-            'time_since_follows_pause',
-            'time_since_chord_character',
-            'time_since_chord_size'
-        ]
-        
-        LOG_TIME_SINCE_FEATURES = [f'log_{f}' for f in MIDIHUM_TIME_FEATURES]
-        
-        INTERVAL_FEATURES = [
-            'interval_from_pressed',
-            'interval_from_released',
-            'abs_interval_from_pressed',
-            'abs_interval_from_released',
-            'log_abs_interval_from_pressed',
-            'log_abs_interval_from_released'
-        ]
-        
-        # Technical indicator base features
-        TECH_BASE_FEATURES = [
-            'tenkan_sen',
-            'kijun_sen',
-            'senkou_span_a',
-            'senkou_span_b',
-            'chikou_span',
-            'cloud_is_green',
-            'relative_to_tenkan_sen',
-            'relative_to_kijun_sen',
-            'tenkan_sen_relative_to_kijun_sen',
-            'relative_to_chikou_span',
-            'relative_to_cloud'
-        ]
-        
-        # Technical indicator target variables
-        TECH_TARGETS = [
-            'pitch',
-            'log_sustain',
-            'interval_from_released',
-            'interval_from_pressed'
-        ]
+        # Get categorical and continuous features for current config
+        categorical_feature_names = self.categorical_features
+        continuous_feature_names = [f for f in self.feature_list if f not in categorical_feature_names]
         
         for note in notes:
-            # Base categorical features
-            cat_features = [getattr(note, f) for f in BASE_CATEGORICAL_FEATURES]
-            
-            if use_midihum:
-                cat_features.extend([getattr(note, f) for f in MIDIHUM_CATEGORICAL_FEATURES])
+            # Extract categorical features
+            cat_features = []
+            for feature_name in categorical_feature_names:
+                value = getattr(note, feature_name, None)
+                if value is not None and feature_name in self.feature_encoders:
+                    cat_features.append(self.feature_encoders[feature_name].get(value, 0))
+                else:
+                    cat_features.append(0)
             
             categorical_features.append(cat_features)
             
-            # Continuous features
+            # Extract continuous features
             cont_features = []
+            for feature_name in continuous_feature_names:
+                value = getattr(note, feature_name, None)
+                cont_features.append(value if value is not None else 0.0)
             
-            cont_features.extend([getattr(note, f) for f in BASE_FEATURES])
-            
-            if use_midihum:
-                cont_features.extend([getattr(note, f) for f in MIDIHUM_BASIC_FEATURES])
-                cont_features.append(float(note.follows_pause if note.follows_pause is not None else 0))
-                cont_features.append(note.num_played_notes_pressed)
-                cont_features.append(note.avg_pitch_pressed)
-                
-                # Add time since features
-                cont_features.extend([getattr(note, f) for f in MIDIHUM_TIME_FEATURES])
-                
-                # Add log time since features
-                cont_features.extend([getattr(note, f) for f in LOG_TIME_SINCE_FEATURES])
-                
-                # Add interval features
-                cont_features.extend([getattr(note, f) for f in INTERVAL_FEATURES])
-                
-                # Add moving average features for pitch and log_sustain
-                for target in ['pitch', 'log_sustain']:
-                    for window in [15, 30, 75]:
-                        # Basic SMA features
-                        sma_types = ['mean', 'min', 'max', 'std']
-                        for sma_type in sma_types:
-                            # Regular SMA
-                            cont_features.append(getattr(note, f'{target}_sma_{sma_type}_{window}'))
-                            # Forward SMA
-                            cont_features.append(getattr(note, f'{target}_fwd_sma_{sma_type}_{window}'))
-                            # Regular SMA oscillator
-                            cont_features.append(getattr(note, f'{target}_sma_{sma_type}_{window}_oscillator'))
-                            # Forward SMA oscillator
-                            cont_features.append(getattr(note, f'{target}_fwd_sma_{sma_type}_{window}_oscillator'))
-                
-                # Add technical indicators
-                for target in TECH_TARGETS:
-                    for feature in TECH_BASE_FEATURES:
-                        feature_name = f'{target}_{feature}'
-                        cont_features.append(getattr(note, feature_name))
-            
-            # Replace None values with 0.0
-            continuous_features.append([x if x is not None else 0.0 for x in cont_features])
-        
-
-        # Apply encodings
-        encoded_categorical = []
-        for features in categorical_features:
-            encoded = []
-            for i, (feature, name) in enumerate(zip(features, self.feature_encoders.keys())):
-                encoded.append(self.feature_encoders[name].get(feature, 0))
-            encoded_categorical.append(encoded)
+            continuous_features.append(cont_features)
         
         # Combine and scale features
-        all_features = np.hstack([np.array(encoded_categorical), np.array(continuous_features)])
+        all_features = np.hstack([np.array(categorical_features), np.array(continuous_features)])
         
         if fit:
             self.feature_scaler = StandardScaler()
@@ -388,11 +559,10 @@ class FeatureExtractor:
         return sorted(list(set(boundaries)))
     
     def extract_features(self, score_notes: np.ndarray, parameters: Optional[np.ndarray] = None, 
-                         plot: Optional[bool] = False, use_midihum_features: bool = False) -> List[ExpressiveNote]:
+                         plot: Optional[bool] = False) -> List[ExpressiveNote]:
         """
         Extract comprehensive features from score and parameters (if available).
-        Features are organized into pitch, voice, rhythm, and phrase categories.
-        If use_midihum_features is True, augment features using MidiHumFeatureEngineer.
+        Features are organized based on the current experiment configuration.
         """
         voices = self.extract_voices(score_notes)
         phrase_boundaries = self.detect_phrase_boundaries(score_notes)
@@ -504,7 +674,7 @@ class FeatureExtractor:
                 
                 expressive_notes.append(expressive_note)
 
-        if use_midihum_features:
+        if self.experiment_info['use_midihum']:
             # Convert ExpressiveNote list to DataFrame
             from dataclasses import asdict
             note_df = pd.DataFrame([asdict(n) for n in expressive_notes])

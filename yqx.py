@@ -14,7 +14,7 @@ from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
 import partitura as pt
 from tqdm import tqdm
-import hook
+# import hook
 import warnings
 from omegaconf import OmegaConf, DictConfig
 import torch
@@ -25,7 +25,7 @@ warnings.filterwarnings('ignore')
 from expressivenote import ExpressiveNote  
 from gmm import BayesianExpressiveModel
 from bvae import BVAEExpressiveModel
-from flow import FMExpressiveModel
+from flow_JASCO import FMExpressiveModel
 from xgboost_model import XGBoostExpressiveModel
 from features import FeatureExtractor
 
@@ -104,7 +104,8 @@ class YQXSystem:
             self.atepp_meta_csv = config.data.atepp_meta_csv
         
         # Initialize components
-        self.feature_extractor = FeatureExtractor()
+        feature_config = config.model.get('feature_experiment', 'full_context')
+        self.feature_extractor = FeatureExtractor(experiment_config=feature_config)
 
         # Initialize wandb
         wandb.init(
@@ -198,6 +199,17 @@ class YQXSystem:
         # Add model type
         parts.append(config.model.type)
         
+        # Add feature experiment configuration
+        feature_config = config.model.get('feature_experiment', 'full_context')
+        if feature_config == 'short_context':
+            parts.append("feats")
+        elif feature_config == 'long_context':
+            parts.append("featl")
+        elif feature_config == 'full_context':
+            parts.append("featf")
+        else:
+            parts.append(f"feat_{feature_config}")
+        
         # Add model-specific parameters if requested
         if config.output.get('include_model_params', True):
             if config.model.type == "gmm":
@@ -206,7 +218,7 @@ class YQXSystem:
                 parts.append(f"hd{config.model.flow.get('hidden_dim', 128)}")
                 parts.append(f"nh{config.model.flow.get('num_heads', 4)}")
                 parts.append(f"nl{config.model.flow.get('num_layers', 2)}")
-                if config.model.flow.get('flow_matcher_type', 'standard') != 'standard':
+                if config.model.flow.get('flow_matcher_type', 'linear') != 'linear':
                     parts.append(f"fmt{config.model.flow.flow_matcher_type}")
             elif config.model.type == "bvae":
                 parts.append(f"ld{config.model.bvae.get('latent_dim', 64)}")
@@ -219,10 +231,6 @@ class YQXSystem:
                 parts.append(f"md{config.model.xgboost.get('max_depth', 7)}")
                 parts.append(f"ne{config.model.xgboost.get('n_estimators', 1700)}")
                 parts.append(f"lr{config.model.xgboost.get('learning_rate', 0.05)}")
-        
-        # Add midihum features flag
-        if config.model.use_midihum_features:
-            parts.append("midihum")
         
         return "_".join(parts)
     
@@ -404,6 +412,7 @@ class YQXSystem:
             return []
         
         cache_file = os.path.join(self.config.output.artifacts_dir, f"atepp_{split}_cache.pkl")
+        
         if os.path.exists(cache_file):
             print(f"Loading ATEPP {split} data from cache...")
             with open(cache_file, 'rb') as f:
@@ -419,7 +428,7 @@ class YQXSystem:
         alignment_paths = sorted(alignment_paths)
         
         # For each alignment file, find corresponding performance and score files
-        for a_path in tqdm(alignment_paths, desc=f"Loading ATEPP {split} data"):
+        for idx, a_path in enumerate(tqdm(alignment_paths, desc=f"Loading ATEPP {split} data")):
             try:
                 # Construct performance path by changing extension
                 p_path = a_path[:-10] + ".mid"  # Remove "_align_n.csv" and add ".mid"
@@ -499,66 +508,132 @@ class YQXSystem:
                 
                 if len(matched_snote_array) > 0 and len(parameters) > 0:
                     note_array_pairs.append((matched_snote_array, parameters))
+                    
             except Exception as e:
                 print(f"Error processing ATEPP file {a_path}: {e}")
                 continue
+            
+            # Save after each file
+            with open(cache_file, 'wb') as f:
+                pickle.dump(note_array_pairs, f)
         
-        # Save to cache
-        with open(cache_file, 'wb') as f:
-            pickle.dump(note_array_pairs, f)
         print(f"Saved {len(note_array_pairs)} ATEPP score-performance pairs to cache")
-        
         print(f"Loaded {len(note_array_pairs)} ATEPP score-performance pairs for {split}")
         return note_array_pairs
 
 
-    def get_dataset_features(self, note_pairs, dataset_name: str, 
-                                       use_midihum: bool = False):
+    def get_dataset_features(self, note_pairs, dataset_name: str):
         """Save extracted features for individual datasets (V422, ASAP, or ATEPP)
         Args:
             note_pairs: List of (score_notes, perf_params) tuples
             dataset_name: Name of the dataset ('v422', 'asap', 'atepp')
-            use_midihum: Whether to use midihum features
         """
-        midihum_suffix = "_midihum" if use_midihum else ""
-
+        # Always cache with full features (including extended context)
         cache_file = os.path.join(self.config.output.artifacts_dir, 
-                                f"{dataset_name}_features{midihum_suffix}_cache.pkl")
+                                f"{dataset_name}_features_full_cache.pkl")
         
         if os.path.exists(cache_file):
-            print(f"Loading {dataset_name} features, midihum: {use_midihum}, from cache...")
+            print(f"Loading {dataset_name} full features from cache...")
             with open(cache_file, 'rb') as f:
                 cache_data = pickle.load(f)
-            print(f"Loaded {dataset_name} features shape: {cache_data['context_features'].shape}, targets shape: {cache_data['targets'].shape} from cache")
+            print(f"Loaded {dataset_name} full features shape: {cache_data['context_features'].shape}, targets shape: {cache_data['targets'].shape} from cache")
+            
+            # Filter features based on current experiment configuration
+            feature_config = self.config.model.get('feature_experiment', 'full_context')
+            if feature_config != 'full_context':
+                # Create a temporary feature extractor with full context to get feature indices
+                full_extractor = FeatureExtractor('full_context')
+                current_extractor = FeatureExtractor(feature_config)
+                
+                # Get feature lists
+                full_features = full_extractor.feature_list
+                current_features = current_extractor.feature_list
+                
+                # Find indices of current features in full feature list
+                feature_indices = []
+                for feature in current_features:
+                    if feature in full_features:
+                        feature_indices.append(full_features.index(feature))
+                
+                # Filter features
+                filtered_features = cache_data['context_features'][:, feature_indices]
+                print(f"Filtered features to {feature_config}: {filtered_features.shape}")
+                
+                return filtered_features, cache_data['targets']
+            
             return cache_data['context_features'], cache_data['targets']
 
-        print(f"Extracting features for {dataset_name} dataset...")
+        print(f"Extracting full features for {dataset_name} dataset...")
         training_notes, avg_tempos = [], []
-        for idx, (score_notes, perf_params) in tqdm(enumerate(note_pairs)):
+        full_extractor = FeatureExtractor('full_context')
+        
+        # Keep track of accumulated features and targets
+        context_features = None
+        targets = None
+        
+        for idx, (score_notes, perf_params) in enumerate(tqdm(note_pairs, desc=f"Processing {dataset_name}")):
             if not self.config.train.enabled and idx == 1:
                 print("Skipping further data loading for training, only using first piece")
                 break
-            
-            # to investigate later!
-            if score_notes.shape != perf_params.shape:
-                # print(f"Warning: Score notes and performance parameters have different shapes: {score_notes.shape} != {perf_params.shape}")
-                continue
             
             # filter out outliers and standardize the time parameters to 120 bpm
             score_notes, perf_params, avg_tempo = self.feature_extractor.standardize_targets(score_notes, perf_params)
             avg_tempos.append(avg_tempo)
             
-            expressive_notes = self.feature_extractor.extract_features(
+            # Always extract with full features (including extended context)
+            expressive_notes = full_extractor.extract_features(
                 score_notes, 
-                perf_params, 
-                use_midihum_features=self.config.model.use_midihum_features
+                perf_params
             )
             
             if idx == 0 and self.config.output.plot_targets:
                 plot_path = os.path.join(self.config.output.artifacts_dir, "train_params.png")
-                self.feature_extractor.plot_targets(expressive_notes, plot_path)
+                full_extractor.plot_targets(expressive_notes, plot_path)
             
             training_notes.append(expressive_notes)
+            
+            # Filter notes with targets for this piece only
+            piece_notes_filtered = [note for note in expressive_notes if 
+                                   note.beat_period is not None and
+                                   note.timing is not None and
+                                   note.velocity is not None and
+                                   note.articulation_log is not None]
+            
+            # Extract features for this piece only
+            if context_features is None:
+                context_features = full_extractor.encode_features(piece_notes_filtered, fit=True)
+                targets = np.array([[
+                    note.beat_period,
+                    note.timing,
+                    note.velocity,
+                    note.articulation_log
+                ] for note in piece_notes_filtered])
+            else:
+                # Subsequent pieces: only encode new notes and append
+                new_features = full_extractor.encode_features(piece_notes_filtered, fit=False)
+                new_targets = np.array([[
+                    note.beat_period,
+                    note.timing,
+                    note.velocity,
+                    note.articulation_log
+                ] for note in piece_notes_filtered])
+                
+                # Append new features and targets
+                context_features = np.vstack([context_features, new_features])
+                targets = np.vstack([targets, new_targets])
+            
+            # Save to cache after each piece
+            cache_data = {
+                'context_features': context_features,
+                'targets': targets,
+                'dataset_name': dataset_name,
+                'feature_shape': context_features.shape,
+                'target_shape': targets.shape,
+                'avg_tempos': avg_tempos
+            }
+            
+            with open(cache_file, 'wb') as f:
+                pickle.dump(cache_data, f)
         
         if self.config.output.save_distributions:
             # Save the distribution of the training notes targets and avg_tempo
@@ -578,10 +653,10 @@ class YQXSystem:
                                  note.velocity is not None and
                                  note.articulation_log is not None]
         
-        context_features = self.feature_extractor.encode_features(
+        # Encode with full features
+        context_features = full_extractor.encode_features(
             training_notes_filtered, 
-            fit=True, 
-            use_midihum=self.config.model.use_midihum_features
+            fit=True
         )
         
         targets = np.array([[
@@ -591,11 +666,10 @@ class YQXSystem:
             note.articulation_log
         ] for note in training_notes_filtered])
         
-        # Save to cache
+        # Save to final cache
         cache_data = {
             'context_features': context_features,
             'targets': targets,
-            'use_midihum': use_midihum,
             'dataset_name': dataset_name,
             'feature_shape': context_features.shape,
             'target_shape': targets.shape,
@@ -605,15 +679,34 @@ class YQXSystem:
         with open(cache_file, 'wb') as f:
             pickle.dump(cache_data, f)
         
-        print(f"Saved {dataset_name} features cache, midihum: {use_midihum}")
-        print(f"Features shape: {context_features.shape}, Targets shape: {targets.shape}")
+        print(f"Saved {dataset_name} full features cache")
+        print(f"Full features shape: {context_features.shape}, Targets shape: {targets.shape}")
+        
+        # Filter features based on current experiment configuration
+        feature_config = self.config.model.get('feature_experiment', 'full_context')
+        if feature_config != 'full_context':
+            # Get feature lists
+            current_extractor = FeatureExtractor(feature_config)
+            full_features = full_extractor.feature_list
+            current_features = current_extractor.feature_list
+            
+            # Find indices of current features in full feature list
+            feature_indices = []
+            for feature in current_features:
+                if feature in full_features:
+                    feature_indices.append(full_features.index(feature))
+            
+            # Filter features
+            filtered_features = context_features[:, feature_indices]
+            print(f"Filtered features to {feature_config}: {filtered_features.shape}")
+            
+            return filtered_features, targets
+        
         return context_features, targets
 
 
     def load_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Load and split data into training and validation sets"""
-        
-        use_midihum = self.config.model.use_midihum_features
         
         print("Loading training data...")
         note_pairs = [] 
@@ -621,19 +714,19 @@ class YQXSystem:
         targets = []
         if self.use_vienna4x22: # default, most time will use 
             note_pairs = self.get_v422_aligned_note_arrays('train')
-            context_features_vienna, targets_vienna = self.get_dataset_features(note_pairs, 'v422', use_midihum)
+            context_features_vienna, targets_vienna = self.get_dataset_features(note_pairs, 'v422')
             context_features.append(context_features_vienna)
             targets.append(targets_vienna)
         elif self.asap_dir is not None:
             print("Loading ASAP training data...")
             note_pairs.extend(self.get_asap_aligned_note_arrays('train', self.asap_split_csv))
-            context_features_asap, targets_asap = self.get_dataset_features(note_pairs, 'asap', use_midihum)
+            context_features_asap, targets_asap = self.get_dataset_features(note_pairs, 'asap')
             context_features.append(context_features_asap)
             targets.append(targets_asap)
         if self.atepp_dir is not None:
             print("Loading ATEPP training data...")
             note_pairs.extend(self.get_atepp_aligned_note_arrays('train', self.atepp_meta_csv))
-            context_features_atepp, targets_atepp = self.get_dataset_features(note_pairs, 'atepp', use_midihum)
+            context_features_atepp, targets_atepp = self.get_dataset_features(note_pairs, 'atepp')
             context_features.append(context_features_atepp)
             targets.append(targets_atepp)
         print(f"Loaded {len(note_pairs)} score-performance pairs")
@@ -700,8 +793,8 @@ class YQXSystem:
         
         print(f"Training time: {time.time() - t0} seconds")
         
-        # Save model and encoders
-        self.save_model()
+        # Save final best model (models already track best internally)
+        self.save_model(save_best=True)
         
         # Finish wandb run
         wandb.finish()
@@ -718,16 +811,14 @@ class YQXSystem:
         # Extract features
         print("Extracting features...")
         expressive_notes = self.feature_extractor.extract_features(
-            score_notes, 
-            use_midihum_features=self.config.model.use_midihum_features
+            score_notes
         )
         
         # Predict expressive parameters (model-agnostic)
         print("Predicting expressive parameters...")
         context_features = self.feature_extractor.encode_features(
             expressive_notes, 
-            fit=False, 
-            use_midihum=self.config.model.use_midihum_features
+            fit=False
         )
         predictions = self.model.predict(context_features)
         
