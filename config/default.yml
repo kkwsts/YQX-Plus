@@ -38,8 +38,8 @@ model:
   bvae:
     latent_dim: 64
     hidden_dim: 128
-    num_heads: 4
-    num_layers: 2
+    num_heads: 8
+    num_layers: 6
     beta: 4.0
     gamma: 10.0
     learning_rate: 0.001

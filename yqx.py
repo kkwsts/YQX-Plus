@@ -14,7 +14,7 @@ from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
 import partitura as pt
 from tqdm import tqdm
-# import hook
+import hook
 import warnings
 from omegaconf import OmegaConf, DictConfig
 import torch
@@ -108,11 +108,11 @@ class YQXSystem:
         self.feature_extractor = FeatureExtractor(experiment_config=feature_config)
 
         # Initialize wandb
-        wandb.init(
-            project="yqx-expressive-performance",
-            config=dict(self.config),
-            name=self._generate_model_identifier(self.config)
-        )
+        # wandb.init(
+        #     project="yqx-expressive-performance",
+        #     config=dict(self.config),
+        #     name=self._generate_model_identifier(self.config)
+        # )
         
         self.train_features, self.train_targets, self.val_features, self.val_targets = self.load_data()
 
@@ -687,7 +687,7 @@ class YQXSystem:
         if feature_config != 'full_context':
             # Get feature lists
             current_extractor = FeatureExtractor(feature_config)
-            full_features = full_extractor.feature_list
+            full_features = current_extractor.feature_list
             current_features = current_extractor.feature_list
             
             # Find indices of current features in full feature list
@@ -732,7 +732,7 @@ class YQXSystem:
         print(f"Loaded {len(note_pairs)} score-performance pairs")
 
         # Log dataset info
-        wandb.log({"dataset_size": len(note_pairs)})
+        # wandb.log({"dataset_size": len(note_pairs)})
         
         context_features = np.vstack(context_features)
         targets = np.vstack(targets)
@@ -788,6 +788,10 @@ class YQXSystem:
         self.val_features = self.val_features[~val_nan_mask]
         self.val_targets = self.val_targets[~val_nan_mask]
 
+        # Pass save_path to model training for epoch-by-epoch saving
+        if self.config.model.type in ["bvae", "flow"]:
+            train_kwargs['save_path'] = self.model_path
+        
         self.model.train(self.train_features, self.train_targets, 
                         val_features=self.val_features, val_targets=self.val_targets, **train_kwargs)
         
@@ -803,9 +807,12 @@ class YQXSystem:
         """Render expressive performance of a MusicXML score"""
         print(f"Loading score: {musicxml_path}")
         
+        # Ensure feature extractor matches model's training config if available
+        if self.config.model.feature_experiment is not None:
+            self.feature_extractor = FeatureExtractor(self.config.model.feature_experiment)
+        
         # Load score
         score_part = pt.load_musicxml(musicxml_path)[0]
-        
         score_notes = score_part.note_array()
         
         # Extract features
@@ -813,15 +820,41 @@ class YQXSystem:
         expressive_notes = self.feature_extractor.extract_features(
             score_notes
         )
-        
         # Predict expressive parameters (model-agnostic)
         print("Predicting expressive parameters...")
         context_features = self.feature_extractor.encode_features(
             expressive_notes, 
             fit=False
         )
+        
+        feature_config = self.config.model.get('feature_experiment', 'full_context')
+        if feature_config != 'full_context':
+            # Get feature lists
+            current_extractor = FeatureExtractor(feature_config)
+            full_features = current_extractor.feature_list
+            current_features = current_extractor.feature_list
+            
+            # Find indices of current features in full feature list
+            feature_indices = []
+            for feature in current_features:
+                if feature in full_features:
+                    feature_indices.append(full_features.index(feature))
+            
+            # Filter features
+            context_features = context_features[:, feature_indices]
+            print(f"Filtered features to {feature_config}: {context_features.shape}")
+ 
         predictions = self.model.predict(context_features)
         
+        # Save predicted parameters
+        piece_name = os.path.basename(output_midi).replace('_predicted.mid', '')
+        output_dir = os.path.dirname(output_midi)
+
+        # Also save as numpy array for easy loading
+        pred_np_path = os.path.join(output_dir, f"{piece_name}_predicted_parameters.npy")
+        np.save(pred_np_path, predictions)
+        print(f"Saved predicted parameters (numpy) to: {pred_np_path}")
+    
         # Convert predictions back to ExpressiveNote objects
         predicted_expressive_notes = []
         for i, note in enumerate(expressive_notes):
@@ -830,12 +863,6 @@ class YQXSystem:
                 onset_beat=note.onset_beat,
                 duration_beat=note.duration_beat,
                 voice=note.voice,
-                pitch_interval=note.pitch_interval,
-                duration_ratio=note.duration_ratio,
-                rhythmic_context=note.rhythmic_context,
-                ir_label=note.ir_label,
-                ir_closure=note.ir_closure,
-                position_in_phrase=note.position_in_phrase,
                 beat_period=float(np.clip(predictions[i, 0], 0.3, 3.0)),
                 timing=float(np.clip(predictions[i, 1], -0.5, 0.5)),
                 velocity=int(np.clip(predictions[i, 2] * 127, 1, 127)),

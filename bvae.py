@@ -435,10 +435,15 @@ class BVAEExpressiveModel:
     
     def train(self, context_features: np.ndarray, targets: np.ndarray,
               val_features: np.ndarray = None, val_targets: np.ndarray = None,
-              epochs: int = 1000, batch_size: int = 32):
+              epochs: int = 1000, batch_size: int = 32, save_path: str = None):
         """Train the β-VAE model on pre-extracted features and targets"""
         print("Training β-VAE model...")
         print(f"Training on {len(context_features)} samples")
+        
+        # Set save path for epoch-by-epoch saving
+        if save_path is not None:
+            self.save_path = save_path
+            print(f"Will save model to: {self.save_path}")
         
         # Scale features and targets
         context_features_scaled = self.context_scaler.fit_transform(context_features)
@@ -566,7 +571,7 @@ class BVAEExpressiveModel:
                     best_filepath = f"{base_path}_best.{extension}"
                     
                     best_model_data = {
-                        'model_state_dict': self.best_model_state,
+                        'model_state_dict': best_model_state,
                         'context_scaler': self.context_scaler,
                         'target_scaler': self.target_scaler,
                         'context_dim': self.context_dim,

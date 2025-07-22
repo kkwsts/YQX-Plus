@@ -336,7 +336,7 @@ class FMExpressiveModel(StreamingModule):
 
     def train_model(self, context_features: np.ndarray, targets: np.ndarray, 
                    val_features: np.ndarray = None, val_targets: np.ndarray = None,
-                   epochs: int = 1000, batch_size: int = 32):
+                   epochs: int = 1000, batch_size: int = 32, save_path: str = None):
         """Train the flow matching model on pre-extracted features and targets"""
         
         print("Training flow matching model...")
@@ -350,6 +350,11 @@ class FMExpressiveModel(StreamingModule):
         if self.features_dim is None:
             self.features_dim = context_features.shape[1]
             print(f"Setting features_dim to {self.features_dim}")
+        
+        # Set save path for epoch-by-epoch saving
+        if save_path is not None:
+            self.save_path = save_path
+            print(f"Will save model to: {self.save_path}")
         
         X = context_features.copy()
         y = targets.copy()
@@ -545,7 +550,11 @@ class FMExpressiveModel(StreamingModule):
         if isinstance(mode_or_features, bool):
             return super().train(mode_or_features)
         context_features = mode_or_features
-        return self.train_model(context_features, targets, val_features=val_features, val_targets=val_targets, **kwargs)
+        
+        # Extract save_path from kwargs if provided
+        save_path = kwargs.pop('save_path', None)
+        
+        return self.train_model(context_features, targets, val_features=val_features, val_targets=val_targets, save_path=save_path, **kwargs)
 
     def sample(self, features: torch.Tensor, n_steps: int = 50, method: str = "dopri5", 
                ode_rtol: float = 1e-5, ode_atol: float = 1e-5) -> torch.Tensor:
@@ -724,7 +733,6 @@ class FMExpressiveModel(StreamingModule):
             print(f"Best model was at epoch {getattr(self, 'best_epoch', 0) + 1} with loss: {getattr(self, 'best_loss', float('inf')):.6f}")
 
     def load(self, filepath: str):
-        """Enhanced load with AudioCraft compatibility"""
         checkpoint = torch.load(filepath, map_location=self.device)
         
         # Update dimensions with backward compatibility
@@ -752,13 +760,6 @@ class FMExpressiveModel(StreamingModule):
         if saved_device != str(self.device):
             print(f"Info: Model was saved on {saved_device} but loading on {self.device}")
         
-        # Check AudioCraft compatibility
-        saved_with_audiocraft = checkpoint.get('audiocraft_available', False)
-        if saved_with_audiocraft:
-            print("Warning: Model was saved with AudioCraft but AudioCraft is not available. Some features may not work.")
-        elif not saved_with_audiocraft:
-            print("Info: Model was saved without AudioCraft but AudioCraft is now available. Enhanced features will be used.")
-        
         # Load model state
         try:
             self.load_state_dict(checkpoint['model_state_dict'])
@@ -770,8 +771,8 @@ class FMExpressiveModel(StreamingModule):
             elif model_type == 'last':
                 print("Loaded last model (final epoch)")
             else:
-                print("Loaded model (legacy format)")
+                print(f"Loaded model {model_type}")
+            self.trained = True
                 
         except Exception as e:
             print(f"Error loading model state: {e}")
-            print("This might be due to AudioCraft availability mismatch. Consider retraining.")
