@@ -8,8 +8,8 @@ from sklearn.preprocessing import StandardScaler
 from torchinfo import summary
 import wandb
 import math
-from audiocraft.modules.transformer import StreamingTransformerLayer, create_norm_fn
-from audiocraft.modules.unet_transformer import UnetTransformer
+from audiocraft.audiocraft.modules.transformer import StreamingTransformerLayer, create_norm_fn
+from audiocraft.audiocraft.modules.unet_transformer import UnetTransformer
 from expressivenote import ExpressiveNote
 
 from torch.cuda.amp import autocast, GradScaler
@@ -435,10 +435,15 @@ class BVAEExpressiveModel:
     
     def train(self, context_features: np.ndarray, targets: np.ndarray,
               val_features: np.ndarray = None, val_targets: np.ndarray = None,
-              epochs: int = 1000, batch_size: int = 32):
+              epochs: int = 1000, batch_size: int = 32, save_path: str = None):
         """Train the β-VAE model on pre-extracted features and targets"""
         print("Training β-VAE model...")
         print(f"Training on {len(context_features)} samples")
+        
+        # Set save path for epoch-by-epoch saving
+        if save_path is not None:
+            self.save_path = save_path
+            print(f"Will save model to: {self.save_path}")
         
         # Scale features and targets
         context_features_scaled = self.context_scaler.fit_transform(context_features)
@@ -558,6 +563,35 @@ class BVAEExpressiveModel:
                 best_loss = current_loss
                 best_epoch = epoch
                 best_model_state = self.model.state_dict().copy()
+                
+                # Save best model immediately when found
+                if hasattr(self, 'save_path'):
+                    base_path = self.save_path.rsplit('.', 1)[0] 
+                    extension = self.save_path.rsplit('.', 1)[1] if '.' in self.save_path else 'pth'
+                    best_filepath = f"{base_path}_best.{extension}"
+                    
+                    best_model_data = {
+                        'model_state_dict': best_model_state,
+                        'context_scaler': self.context_scaler,
+                        'target_scaler': self.target_scaler,
+                        'context_dim': self.context_dim,
+                        'target_dim': self.target_dim,
+                        'latent_dim': self.latent_dim,
+                        'hidden_dim': self.hidden_dim,
+                        'num_heads': self.num_heads,
+                        'num_layers': self.num_layers,
+                        'beta': self.beta,
+                        'gamma': self.gamma,
+                        'use_midihum': self.use_midihum,
+                        'learning_rate': self.learning_rate,
+                        'trained': True,
+                        'feature_scaler': getattr(self, 'feature_scaler', None),
+                        'model_type': 'best',
+                        'best_epoch': best_epoch,
+                        'best_loss': best_loss,
+                    }
+                    torch.save(best_model_data, best_filepath)
+                    print(f"New best model saved to {best_filepath} (epoch {epoch + 1}, loss: {best_loss:.6f})")
             
             # Log to wandb
             if val_loss is not None:
@@ -581,6 +615,31 @@ class BVAEExpressiveModel:
                     "bvae_capacity_loss": (epoch_loss - epoch_recon_loss - epoch_kld_loss) / num_batches,
                     "learning_rate": self.scheduler.get_last_lr()[0]
                 })
+            
+            # Save model every epoch (replace previous save)
+            if hasattr(self, 'save_path'):
+                # Save current model state
+                current_model_data = {
+                    'model_state_dict': self.model.state_dict(),
+                    'context_scaler': self.context_scaler,
+                    'target_scaler': self.target_scaler,
+                    'context_dim': self.context_dim,
+                    'target_dim': self.target_dim,
+                    'latent_dim': self.latent_dim,
+                    'hidden_dim': self.hidden_dim,
+                    'num_heads': self.num_heads,
+                    'num_layers': self.num_layers,
+                    'beta': self.beta,
+                    'gamma': self.gamma,
+                    'use_midihum': self.use_midihum,
+                    'learning_rate': self.learning_rate,
+                    'trained': True,
+                    'feature_scaler': getattr(self, 'feature_scaler', None),
+                    'model_type': 'current',
+                    'current_epoch': epoch,
+                    'current_loss': current_loss,
+                }
+                torch.save(current_model_data, self.save_path)
             
             if (epoch + 1) % 100 == 0:
                 avg_loss = epoch_loss / num_batches
@@ -676,6 +735,9 @@ class BVAEExpressiveModel:
         """Save trained β-VAE model"""
         if feature_scaler is not None:
             self.feature_scaler = feature_scaler
+        
+        # Set save path for epoch-by-epoch saving
+        self.save_path = filepath
             
         model_data = {
             'model_state_dict': self.model.state_dict() if self.model else None,
