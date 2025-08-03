@@ -1,0 +1,41 @@
+{
+  "model_type": "bvae",
+  "model_config": {
+    "type": "bvae",
+    "feature_experiment": "full_context",
+    "use_midihum_features": false,
+    "gmm": "{'n_components': 16, 'random_state': 42}",
+    "flow": "{'hidden_dim': 128, 'num_heads': 8, 'num_layers': 6, 'flow_matcher_type': 'linear', 'epochs': 1000, 'batch_size': 32, 'sigma': 0.01}",
+    "bvae": "{'latent_dim': 64, 'hidden_dim': 128, 'num_heads': 8, 'num_layers': 6, 'beta': 4.0, 'gamma': 10.0, 'learning_rate': 0.001, 'epochs': 1000, 'batch_size': 32}",
+    "xgboost": "{'learning_rate': 0.05, 'max_depth': 9, 'n_estimators': 2500, 'subsample': 0.9, 'colsample_bytree': 0.6, 'reg_alpha': 0.2, 'reg_lambda': 0.4, 'random_state': 42, 'n_jobs': 8}",
+    "device": "cpu"
+  },
+  "model_path": "ckpts/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0.pkl",
+  "use_midihum_features": false,
+  "pieces": {
+    "Chopin_op10_no3": {
+      "input_score": "/Users/kkwsts/Datasets/vienna4x22/musicxml/Chopin_op10_no3.musicxml",
+      "output_midi": "outputs/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0/Chopin_op10_no3_predicted.mid",
+      "predictions_plot": "outputs/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0/Chopin_op10_no3_predictions.png",
+      "designated_tempo": 30
+    },
+    "Chopin_op38": {
+      "input_score": "/Users/kkwsts/Datasets/vienna4x22/musicxml/Chopin_op38.musicxml",
+      "output_midi": "outputs/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0/Chopin_op38_predicted.mid",
+      "predictions_plot": "outputs/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0/Chopin_op38_predictions.png",
+      "designated_tempo": 120
+    },
+    "Mozart_K331_1st-mov": {
+      "input_score": "/Users/kkwsts/Datasets/vienna4x22/musicxml/Mozart_K331_1st-mov.musicxml",
+      "output_midi": "outputs/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0/Mozart_K331_1st-mov_predicted.mid",
+      "predictions_plot": "outputs/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0/Mozart_K331_1st-mov_predictions.png",
+      "designated_tempo": 120
+    },
+    "Schubert_D783_no15": {
+      "input_score": "/Users/kkwsts/Datasets/vienna4x22/musicxml/Schubert_D783_no15.musicxml",
+      "output_midi": "outputs/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0/Schubert_D783_no15_predicted.mid",
+      "predictions_plot": "outputs/bvae_featf_ld64_hd128_nh8_nl6_b4.0_g10.0/Schubert_D783_no15_predictions.png",
+      "designated_tempo": 130
+    }
+  }
+}
