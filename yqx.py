@@ -14,7 +14,7 @@ from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
 import partitura as pt
 from tqdm import tqdm
-import hook
+# import hook
 import warnings
 from omegaconf import OmegaConf, DictConfig
 import torch
@@ -24,8 +24,8 @@ warnings.filterwarnings('ignore')
 
 from expressivenote import ExpressiveNote  
 from gmm import BayesianExpressiveModel
-from bvae import BVAEExpressiveModel
-from flow_JASCO import FMExpressiveModel
+# from bvae import BVAEExpressiveModel
+# from flow_JASCO import FMExpressiveModel
 from xgboost_model import XGBoostExpressiveModel
 from features import FeatureExtractor
 
@@ -108,11 +108,11 @@ class YQXSystem:
         self.feature_extractor = FeatureExtractor(experiment_config=feature_config)
 
         # Initialize wandb
-        # wandb.init(
-        #     project="yqx-expressive-performance",
-        #     config=dict(self.config),
-        #     name=self._generate_model_identifier(self.config)
-        # )
+        wandb.init(
+            project="yqx-expressive-performance",
+            config=dict(self.config),
+            name=self._generate_model_identifier(self.config)
+        )
         
         self.train_features, self.train_targets, self.val_features, self.val_targets = self.load_data()
 
@@ -129,7 +129,8 @@ class YQXSystem:
             gmm_config = config.model.gmm
             self.model = BayesianExpressiveModel(
                 n_components=gmm_config.n_components,
-                random_state=gmm_config.get('random_state', 42)
+                random_state=gmm_config.get('random_state', 42),
+                device=device
             )
         elif config.model.type == "flow":
             flow_config = config.model.flow
@@ -268,6 +269,11 @@ class YQXSystem:
         print(f"Computing ASAP {split} data (will be cached for future use)...")
         note_array_pairs = []
         
+        # Add memory monitoring
+        import psutil
+        initial_memory = psutil.virtual_memory().available / 1024**3
+        print(f"Initial available memory: {initial_memory:.1f} GB")
+        
         # Load split information if provided
         split_performances = set()
         if split_csv_path and os.path.exists(split_csv_path):
@@ -352,6 +358,12 @@ class YQXSystem:
             
             if len(matched_snote_array) > 0 and len(parameters) > 0:
                 note_array_pairs.append((matched_snote_array, parameters))
+                
+            # Memory cleanup after each performance
+            del score, score_part, snote_array, performance, alignment
+            del parameters, snote_ids, matched_snote_array
+            import gc
+            gc.collect()
             
         with open(cache_file, 'wb') as f:
             pickle.dump(note_array_pairs, f)
@@ -732,7 +744,7 @@ class YQXSystem:
         print(f"Loaded {len(note_pairs)} score-performance pairs")
 
         # Log dataset info
-        # wandb.log({"dataset_size": len(note_pairs)})
+        wandb.log({"dataset_size": len(note_pairs)})
         
         context_features = np.vstack(context_features)
         targets = np.vstack(targets)
@@ -777,6 +789,10 @@ class YQXSystem:
             # keeps it for the interface consistent
             train_kwargs['epochs'] = 1
             train_kwargs['batch_size'] = None
+        elif self.config.model.type == "gmm":
+            train_kwargs['n_components'] = self.config.model.gmm.get('n_components', 8)
+            train_kwargs['epochs'] = 10
+            
         
         # filter out the data with nan in train_features 
         nan_mask = np.isnan(self.train_features).any(axis=1)
@@ -789,8 +805,12 @@ class YQXSystem:
         self.val_targets = self.val_targets[~val_nan_mask]
 
         # Pass save_path to model training for epoch-by-epoch saving
-        if self.config.model.type in ["bvae", "flow"]:
+        # if self.config.model.type in ["bvae", "flow"]:
+        #     train_kwargs['save_path'] = self.model_path
+        if self.config.model.type in ["bvae", "flow", "gmm"]:
             train_kwargs['save_path'] = self.model_path
+            if self.config.model.type == "gmm":
+                train_kwargs['save_frequency'] = self.config.model.gmm.get('save_frequency', 'per_target')
         
         self.model.train(self.train_features, self.train_targets, 
                         val_features=self.val_features, val_targets=self.val_targets, **train_kwargs)
@@ -865,7 +885,7 @@ class YQXSystem:
                 voice=note.voice,
                 beat_period=float(np.clip(predictions[i, 0], 0.3, 3.0)),
                 timing=float(np.clip(predictions[i, 1], -0.5, 0.5)),
-                velocity=int(np.clip(predictions[i, 2] * 127, 1, 127)),
+                velocity=np.clip(predictions[i, 2], 0, 127),
                 articulation_log=float(np.clip(predictions[i, 3], -2.0, 1.0))
             )
             predicted_expressive_notes.append(new_note)
@@ -925,6 +945,8 @@ class YQXSystem:
             performance_params,
             return_performance_array=False
         )
+
+        performed_note_array = performed_part.note_array()
         
         # Create performance object
         performance = pt.performance.Performance(

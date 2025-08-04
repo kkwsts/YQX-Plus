@@ -13,7 +13,7 @@ from typing import List, Tuple, Dict, Optional
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 import xgboost as xgb
-# import wandb
+import wandb
 from torchinfo import summary
 
 
@@ -160,10 +160,10 @@ class XGBoostExpressiveModel:
                 print()
             
             # Log to wandb
-            # wandb.log({
-            #     f"xgboost_{target_name}_train_r2": train_score,
-            #     f"xgboost_{target_name}_val_r2": val_score if val_score is not None else 0.0
-            # })
+            wandb.log({
+                f"xgboost_{target_name}_train_r2": train_score,
+                f"xgboost_{target_name}_val_r2": val_score if val_score is not None else 0.0
+            })
         
         # Calculate overall scores
         avg_train_score = np.mean(train_scores)
@@ -173,10 +173,10 @@ class XGBoostExpressiveModel:
         if avg_val_score is not None:
             print(f"Overall Validation R²: {avg_val_score:.4f}")
         
-        # wandb.log({
-        #     "xgboost_avg_train_r2": avg_train_score,
-        #     "xgboost_avg_val_r2": avg_val_score if avg_val_score is not None else 0.0
-        # })
+        wandb.log({
+            "xgboost_avg_train_r2": avg_train_score,
+            "xgboost_avg_val_r2": avg_val_score if avg_val_score is not None else 0.0
+        })
         
         self.trained = True
         print("XGBoost training completed!")

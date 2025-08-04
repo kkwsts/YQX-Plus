@@ -215,7 +215,7 @@ class BetaVAE(nn.Module):
         
         self.device = device
         
-        # Build encoder: context -> latent (no target input to avoid leakage)
+        # Build encoder: context -> latent 
         self.encoder = TransformerEncoder(
             input_dim=context_dim,
             hidden_dim=hidden_dim,

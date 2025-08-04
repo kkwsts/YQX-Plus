@@ -218,10 +218,8 @@ class VectorFieldNetwork(nn.Module):
         embedded = embedded.unsqueeze(1)  # [B, 1, hidden_dim]
         
         if self.uses_audiocraft:
-            # AudioCraft UnetTransformer
             transformer_output = self.transformer(embedded)  # [B, 1, hidden_dim]
         else:
-            # PyTorch Transformer
             transformer_output = self.transformer(embedded)  # [B, 1, hidden_dim]
             
         # Remove sequence dimension
@@ -318,7 +316,6 @@ class FMExpressiveModel(StreamingModule):
         x0 = torch.randn_like(target)
         x1 = target
         
-        # Sample time uniformly
         t = torch.rand(batch_size, device=target.device)
         
         epsilon = torch.randn_like(target)
