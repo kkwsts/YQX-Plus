@@ -1,7 +1,7 @@
 # YQX+: Benchmarking Probabilistic Modelling of Performance Expression
 
 This repository expand on the idea of the [YQX system]() for expressive music performance, that 
-The system predicts expressive performance parameters from musical score context using a Bayesian model trained on human performances.
+the system predicts expressive performance parameters from musical score context using a Bayesian model trained on human performances.
 
 
 ## Overview
@@ -11,6 +11,8 @@ The system predicts expressive performance parameters from musical score context
 - Predicts expressive parameters for new scores
 - Renders expressive MIDI performances
 - Automated testing framework with organized experiment tracking
+
+Check out our [sample page](https://www.notion.so/jwzhouu/YQX-Benchmarking-Probabilistic-Modelling-of-Piano-Performance-Expression-244d6f4ec5b580c48320ddcf603bf433?source=copy_link) for full **Features** list and **demos**.
 
 ## Requirements
 
@@ -196,9 +198,9 @@ We took the features from the [MIDIHUM](https://github.com/erwald/midihum) libra
 
 ## Datasets
 
-- [Vienna4x22]()
-- [ASAP]()
-- more to be added
+- [Vienna4x22](https://repo.mdw.ac.at/projects/IWK/the_vienna_4x22_piano_corpus/index.html)
+- [ASAP](https://github.com/fosfrancesco/asap-dataset)
+- [ATEPP](https://github.com/tangjjbetsy/ATEPP/tree/master)
 
 ## References
 
