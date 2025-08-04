@@ -12,7 +12,6 @@ the system predicts expressive performance parameters from musical score context
 - Renders expressive MIDI performances
 - Automated testing framework with organized experiment tracking
 
-Check out our [sample page](https://www.notion.so/jwzhouu/YQX-Benchmarking-Probabilistic-Modelling-of-Piano-Performance-Expression-244d6f4ec5b580c48320ddcf603bf433?source=copy_link) for full **feature list** and **demos**.
 
 ## Requirements
 
