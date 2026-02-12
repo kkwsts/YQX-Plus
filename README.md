@@ -1,7 +1,6 @@
 # YQX+: Benchmarking Probabilistic Modelling of Performance Expression
 
-This repository expand on the idea of the [YQX system](https://anonymous.4open.science/r/YQX-Plus/README.md) for expressive music performance, that 
-the system predicts expressive performance parameters from musical score context using a Bayesian model trained on human performances.
+This repository expand on the idea of the **YQX system** for expressive music performance, that the system predicts expressive performance parameters from musical score context using a Bayesian model trained on human performances.
 
 
 ## Overview
@@ -12,7 +11,7 @@ the system predicts expressive performance parameters from musical score context
 - Renders expressive MIDI performances
 - Automated testing framework with organized experiment tracking
 
-Check out our [sample page](https://yqx-plus.notion.site/YQX-Benchmarking-Probabilistic-Modelling-of-Piano-Performance-Expression-244d6f4ec5b580c48320ddcf603bf433) for full **feature list** and **demos**.
+Check out our [sample page](https://yqx-plus.notion.site/YQX-Benchmarking-Probabilistic-Modelling-of-Piano-Performance-Expression-244d6f4ec5b580c48320ddcf603bf433) for full **feature ablation study results**, **subjective evaluation**, **pipeline algorithm**, **feature list** and **demos**.
 
 ## Requirements
 
