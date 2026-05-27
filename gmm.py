@@ -143,10 +143,13 @@ class BayesianExpressiveModel:
         n_components_range = range(2, min(self.n_components + 1, len(context_features) // 10))
         
         for n_comp in n_components_range:
-            # Create gmm-gpu GMM model
+            # gmm_gpu initialises with modified kmeans++ refined by kmeans
+            # (matches the paper's "K-Means initialization" claim). Passing
+            # random_seed makes the fit reproducible across runs.
             model = GMM(
                 n_components=n_comp,
-                device=self.device
+                device=self.device,
+                random_seed=self.random_state,
             )
             
             # Prepare joint data - reshape to 3D format expected by gmm-gpu
@@ -192,7 +195,8 @@ class BayesianExpressiveModel:
                 # Try with CPU instead
                 model_cpu = GMM(
                     n_components=n_comp,
-                    device='cpu'
+                    device='cpu',
+                    random_seed=self.random_state,
                 )
                 joint_data_cpu = joint_data_torch.cpu()
                 try:
@@ -250,7 +254,7 @@ class BayesianExpressiveModel:
             print(f"Sampled {len(context_features)} samples for training")
         
         # Create GMM model
-        model = GMM(n_components=self.n_components, device=self.device)
+        model = GMM(n_components=self.n_components, device=self.device, random_seed=self.random_state)
         
         # Prepare data
         joint_data = np.column_stack([context_features, targets])
@@ -276,7 +280,7 @@ class BayesianExpressiveModel:
             return model
         except torch._C._LinAlgError as e:
             print(f"CUDA error for {target_name}. Trying CPU...")
-            model_cpu = GMM(n_components=self.n_components, device='cpu')
+            model_cpu = GMM(n_components=self.n_components, device='cpu', random_seed=self.random_state)
             joint_data_cpu = joint_data_torch.cpu()
             model_cpu.fit(joint_data_cpu)
             return model_cpu
@@ -308,7 +312,7 @@ class BayesianExpressiveModel:
                 round_targets = targets
             
             # Create and train model for this round
-            model = GMM(n_components=self.n_components, device=self.device)
+            model = GMM(n_components=self.n_components, device=self.device, random_seed=self.random_state)
             
             # Prepare data
             joint_data = np.column_stack([round_features, round_targets])
@@ -441,10 +445,10 @@ class BayesianExpressiveModel:
             # Skip component selection and use specified n_components directly for speed
             print(f"Using n_components={self.n_components} for {target_name} (skipping component selection)")
             
-            # Create gmm-gpu GMM model
             model = GMM(
                 n_components=self.n_components,
-                device=self.device
+                device=self.device,
+                random_seed=self.random_state,
             )
             
             # Prepare joint data - reshape to 3D format expected by gmm-gpu
@@ -478,7 +482,7 @@ class BayesianExpressiveModel:
                 model.fit(joint_data_torch)
             except torch._C._LinAlgError as e:
                 print(f"CUDA linear algebra error for {target_name}. Trying CPU fallback...")
-                model_cpu = GMM(n_components=self.n_components, device='cpu')
+                model_cpu = GMM(n_components=self.n_components, device='cpu', random_seed=self.random_state)
                 joint_data_cpu = joint_data_torch.cpu()
                 try:
                     model_cpu.fit(joint_data_cpu)

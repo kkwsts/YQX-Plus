@@ -26,19 +26,32 @@ warnings.filterwarnings('ignore')
 
 @dataclass
 class CorruptionConfig:
-    """Configuration for different types of performance corruptions"""
+    """Configuration for different types of performance corruptions.
+
+    Matches Algorithm 1 in the paper: per performance, each corruption type
+    is drawn independently as a Bernoulli with the probabilities below; if
+    drawn, a penalty sampled from its range is applied. All draws compose
+    additively on a single corrupted sample.
+    """
     # Small mistake penalties (per error, with variability)
-    wrong_notes_penalty_range: tuple = (-3, -1)  # Per wrong note, random in range
-    timing_errors_penalty_range: tuple = (-2, -0.5)  # Per timing error, random in range
-    wrong_dynamics_penalty_range: tuple = (-1.5, -0.3)  # Per dynamic error, random in range
-    
-    # Severe corruption penalties (variable ranges)
-    missing_voice_penalty_range: tuple = (-60, -30)  # Missing entire voice, random in range
-    missing_passage_penalty_range: tuple = (-50, -20)  # Missing significant passages, random in range
-    
-    # Corruption intensity factors (0.1 to 1.0)
+    wrong_notes_penalty_range: tuple = (-3, -1)
+    timing_errors_penalty_range: tuple = (-2, -0.5)
+    wrong_dynamics_penalty_range: tuple = (-1.5, -0.3)
+
+    # Severe corruption penalties
+    missing_voice_penalty_range: tuple = (-60, -30)
+    missing_passage_penalty_range: tuple = (-50, -20)
+
+    # Bernoulli probabilities per Algorithm 1
+    p_wrong_notes: float = 0.5
+    p_timing_errors: float = 0.5
+    p_wrong_dynamics: float = 0.5
+    p_missing_voice: float = 0.2
+    p_missing_passage: float = 0.2
+
+    # Intensity for the small-mistake corruptions
     corruption_intensity_range: tuple = (0.1, 1.0)
-    
+
     # Base scores for datasets
     asap_max_score: int = 80
     atepp_max_score: int = 99
@@ -352,9 +365,22 @@ class DataAugmentationSystem:
             print(f"Error removing passage: {e}")
             return performance, 0
     
-    def apply_corruptions(self, data_item: dict, corruption_type: str = "mixed") -> dict:
-        """Apply various corruption types to create augmented data"""
-        # Don't deep copy - just create new dict with same references
+    def apply_corruptions(self, data_item: dict, corruptions: dict = None) -> dict:
+        """Apply the corruption types flagged True in ``corruptions``.
+
+        Implements one iteration of Algorithm 1: caller decides (via Bernoulli
+        draws) which corruption types fire, this method composes them on a
+        single sample and accumulates the penalty.
+
+        Parameters
+        ----------
+        corruptions : dict[str, bool] | None
+            Keys (any subset of) ``{wrong_notes, timing_errors,
+            wrong_dynamics, missing_voice, missing_passage}``. Missing keys are
+            treated as False. If None, all keys default to True (a "kitchen-
+            sink" sample, useful for debugging).
+        """
+        corruptions = corruptions or {}
         corrupted_item = {
             'score_part': data_item['score_part'],
             'performance': data_item['performance'],
@@ -365,112 +391,83 @@ class DataAugmentationSystem:
         }
         total_penalty = 0
         corruption_description = []
-        
-                # Start with the original performance
         corrupted_performance = data_item['performance']
-        
-        # Apply corruptions directly to the performance with variable intensity
-        if corruption_type == "wrong_notes" or corruption_type == "mixed":
-            # Random corruption intensity
+
+        if corruptions.get('wrong_notes'):
             intensity = np.random.uniform(*self.config.corruption_intensity_range)
             corrupted_performance, wrong_note_count = self.introduce_wrong_notes_to_performance(corrupted_performance, intensity)
-            
             if wrong_note_count > 0:
-                # Variable penalty per error, but cap the total penalty
                 penalty_per_error = np.random.uniform(*self.config.wrong_notes_penalty_range)
-                penalty = wrong_note_count * penalty_per_error
-                # Cap penalty to prevent excessive negative scores
-                penalty = max(penalty, -25)  # Cap at -25 for wrong notes
-                total_penalty += penalty
+                total_penalty += wrong_note_count * penalty_per_error
                 corruption_description.append(f"wrong_notes({wrong_note_count})")
-        
-        if corruption_type == "timing_errors" or corruption_type == "mixed":
+
+        if corruptions.get('timing_errors'):
             intensity = np.random.uniform(*self.config.corruption_intensity_range)
             corrupted_performance, timing_error_count = self.introduce_timing_errors_to_performance(corrupted_performance, intensity)
-            
             if timing_error_count > 0:
                 penalty_per_error = np.random.uniform(*self.config.timing_errors_penalty_range)
-                penalty = timing_error_count * penalty_per_error
-                # Cap penalty to prevent excessive negative scores
-                penalty = max(penalty, -20)  # Cap at -20 for timing errors
-                total_penalty += penalty
+                total_penalty += timing_error_count * penalty_per_error
                 corruption_description.append(f"timing_errors({timing_error_count})")
-        
-        if corruption_type == "dynamic_errors" or corruption_type == "mixed":
+
+        if corruptions.get('wrong_dynamics'):
             intensity = np.random.uniform(*self.config.corruption_intensity_range)
             corrupted_performance, dynamic_error_count = self.introduce_dynamic_errors_to_performance(corrupted_performance, intensity)
-            
             if dynamic_error_count > 0:
                 penalty_per_error = np.random.uniform(*self.config.wrong_dynamics_penalty_range)
-                penalty = dynamic_error_count * penalty_per_error
-                # Cap penalty to prevent excessive negative scores
-                penalty = max(penalty, -15)  # Cap at -15 for dynamic errors
-                total_penalty += penalty
+                total_penalty += dynamic_error_count * penalty_per_error
                 corruption_description.append(f"dynamic_errors({dynamic_error_count})")
-        
-        if corruption_type == "missing_voice":
+
+        if corruptions.get('missing_voice'):
             corrupted_performance, voice_removed = self.remove_voice_from_performance(corrupted_performance)
             if voice_removed:
-                penalty = np.random.uniform(*self.config.missing_voice_penalty_range)
-                total_penalty += penalty
+                total_penalty += np.random.uniform(*self.config.missing_voice_penalty_range)
                 corruption_description.append("missing_voice")
-        
-        if corruption_type == "missing_passage":
+
+        if corruptions.get('missing_passage'):
             corrupted_performance, passage_removed = self.remove_passage_from_performance(corrupted_performance)
             if passage_removed:
-                penalty = np.random.uniform(*self.config.missing_passage_penalty_range)
-                total_penalty += penalty
+                total_penalty += np.random.uniform(*self.config.missing_passage_penalty_range)
                 corruption_description.append("missing_passage")
-        
-        # Calculate final score with total penalty cap
+
         original_score = data_item['max_score']
-        # Cap total penalty to prevent excessive negative scores
-        total_penalty = max(total_penalty, -original_score * 0.8)  # Cap at 80% of original score
-        final_score = max(1, original_score + total_penalty)  # Minimum score of 1
-        
+        final_score = max(1, original_score + total_penalty)
+
+        active = [k for k, v in corruptions.items() if v]
         corrupted_item.update({
             'corrupted_performance': corrupted_performance,
             'original_score': original_score,
             'corrupted_score': final_score,
-            'corruption_type': corruption_type,
+            'corruption_type': "+".join(active) if active else "clean",
             'corruption_description': ",".join(corruption_description),
             'penalty_applied': total_penalty
         })
-
-        
         return corrupted_item
     
     def generate_augmented_data(self, n_augmentations_per_performance: int = 5):
-        """Generate augmented dataset with various corruption types"""
+        """Generate augmented dataset following Algorithm 1.
+
+        For each performance, the clean version is kept as-is and
+        ``n_augmentations_per_performance`` corrupted versions are produced.
+        Each corrupted version draws every corruption type independently as a
+        Bernoulli with the probabilities in ``CorruptionConfig`` (matching
+        Algorithm 1); fired corruptions compose additively on the same sample.
+        """
         print("Starting data augmentation process...")
-        
-        # Load datasets
+
         asap_data = self.load_asap_data() if self.asap_dir else []
         atepp_data = self.load_atepp_data() if self.atepp_dir else []
-        
+
         all_data = asap_data + atepp_data
         print(f"Total performances to augment: {len(all_data)}")
-        
+
         if not all_data:
             print("No data loaded! Please check your dataset paths.")
             return
-        
-        # Define corruption types
-        corruption_types = [
-            "wrong_notes",
-            "timing_errors", 
-            "dynamic_errors",
-            "mixed",
-            "missing_voice",
-            "missing_passage"
-        ]
-        
+
+        cfg = self.config
         augmented_data = []
-        
-        # Generate augmentations
+
         for data_item in tqdm(all_data, desc="Generating augmented performances"):
-            
-            # Add original (clean) performance - don't deep copy, just create new dict
             clean_item = {
                 'score_part': data_item['score_part'],
                 'performance': data_item['performance'],
@@ -486,12 +483,21 @@ class DataAugmentationSystem:
                 'penalty_applied': 0
             }
             augmented_data.append(clean_item)
-            
-            # Generate corrupted versions
-            for i in range(n_augmentations_per_performance):
-                corruption_type = np.random.choice(corruption_types)
-                corrupted_item = self.apply_corruptions(data_item, corruption_type)
-                augmented_data.append(corrupted_item)
+
+            for _ in range(n_augmentations_per_performance):
+                corruptions = {
+                    'wrong_notes':     np.random.random() < cfg.p_wrong_notes,
+                    'timing_errors':   np.random.random() < cfg.p_timing_errors,
+                    'wrong_dynamics':  np.random.random() < cfg.p_wrong_dynamics,
+                    'missing_voice':   np.random.random() < cfg.p_missing_voice,
+                    'missing_passage': np.random.random() < cfg.p_missing_passage,
+                }
+                if not any(corruptions.values()):
+                    # Algorithm 1 can produce an all-False draw (a duplicate of
+                    # the clean sample); skip it to avoid biasing the score
+                    # distribution toward R_max.
+                    continue
+                augmented_data.append(self.apply_corruptions(data_item, corruptions))
         
         print(f"Generated {len(augmented_data)} total performances (including originals)")
         self.corrupted_performances = augmented_data
