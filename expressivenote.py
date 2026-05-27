@@ -103,6 +103,34 @@ class ExpressiveNote:
     ir_closure: Optional[float] = None  # Musical closure measure
     
     #########################################################
+    ##### ADDITIONAL FEATURES (ARTICULATION) ################
+    #########################################################
+    # Basic articulation features
+    has_accent: Optional[bool] = None  # Whether note has accent articulation
+    has_staccato: Optional[bool] = None  # Whether note has staccato articulation
+    articulation_type: Optional[str] = None  # Combined articulation type
+    
+    # ACCENT FEATURES (Velocity-based emphasis)
+    accent_strength: Optional[float] = None  # Velocity multiplier for accent (1.0 = normal, 1.3 = 30% increase)
+    accent_velocity_ratio: Optional[float] = None  # MIDI velocity multiplier for accent
+    
+    # STACCATO FEATURES (Duration-based shortening)
+    staccato_duration_ratio: Optional[float] = None  # Duration ratio due to staccato (0.85 = 85% of written duration)
+    staccato_duration: Optional[float] = None  # Actual duration when staccato is applied
+    staccato_velocity_compensation: Optional[float] = None  # Velocity increase to compensate for shortness
+
+    #########################################################
+    ##### DYNAMIC FEATURES ##################################
+    #########################################################
+    # Basic dynamic features
+    has_dynamic: Optional[bool] = None  # Whether note has dynamic marking
+    dynamic_type: Optional[str] = None  # Type of dynamic (p, f, crescendo, etc.)
+    dynamic_strength: Optional[float] = None  # Dynamic strength (0.0 to 1.0)
+    dynamic_direction: Optional[str] = None  # Direction (increase, decrease, maintain)
+    dynamic_contour: Optional[str] = None  # Simplified: '+1' for crescendo, '-1' for decrescendo, '-2' fordiminuendo
+
+
+    #########################################################
     ##### EXPRESSIVE TARGETS ################################
     #########################################################
     # Expressive targets (None for inference)

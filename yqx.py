@@ -81,7 +81,76 @@ def get_matched_notes(spart_note_array, ppart_note_array, alignment):
 
     return np.array(matched_idxs)
 
-
+class DynamicContextMapper:
+    """Maps dynamic markings to individual notes based on time overlap"""
+    
+    def __init__(self):
+        self.dynamic_contexts = {}  # note_id -> dynamic_info mapping
+    
+    def map_dynamics_to_notes(self, part, note_array):
+        """Map dynamics to notes in a part"""
+        if not part.dynamics:
+            return {}
+        
+        # Create mapping: note_id -> dynamic_info
+        note_dynamic_map = {}
+        
+        for dynamic in part.dynamics:
+            # Get dynamic timing
+            start_time = self._get_time_value(dynamic.start) if hasattr(dynamic, 'start') else None
+            end_time = self._get_time_value(dynamic.end) if hasattr(dynamic, 'end') else None
+            
+            if start_time is None or end_time is None:
+                continue
+            
+            # Get dynamic value
+            if hasattr(dynamic, 'value'):
+                dynamic_value = dynamic.value
+            elif hasattr(dynamic, 'text'):
+                dynamic_value = dynamic.text
+            else:
+                dynamic_value = str(dynamic)
+            
+            # Find notes that overlap with this dynamic's time range
+            overlapping_notes = self._find_overlapping_notes(note_array, start_time, end_time)
+            
+            # Assign dynamic context to each overlapping note
+            for note_id in overlapping_notes:
+                note_dynamic_map[note_id] = {
+                    'dynamic': dynamic_value,
+                    'dynamic_type': type(dynamic).__name__,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'overlap_start': max(start_time, note_array[note_array['id'] == note_id]['onset_beat'][0]),
+                    'overlap_end': min(end_time, note_array[note_array['id'] == note_id]['onset_beat'][0] + 
+                                    note_array[note_array['id'] == note_id]['duration_beat'][0])
+                }
+        
+        return note_dynamic_map
+    
+    def _get_time_value(self, time_obj):
+        """Extract time value from various time objects"""
+        if hasattr(time_obj, 't'):
+            return time_obj.t
+        elif hasattr(time_obj, 'beat'):
+            return time_obj.beat
+        elif hasattr(time_obj, 'time'):
+            return time_obj.time
+        return None
+    
+    def _find_overlapping_notes(self, note_array, start_time, end_time):
+        """Find note IDs that overlap with the given time range"""
+        overlapping_ids = []
+        
+        for note in note_array:
+            note_start = note['onset_beat']
+            note_end = note_start + note['duration_beat']
+            
+            # Check for overlap
+            if (note_start <= end_time and note_end >= start_time):
+                overlapping_ids.append(note['id'])
+        
+        return overlapping_ids
 
 class YQXSystem:
     """Complete YQX expressive performance system"""
@@ -108,15 +177,15 @@ class YQXSystem:
         self.feature_extractor = FeatureExtractor(experiment_config=feature_config)
 
         # Initialize wandb
-        wandb.init(
-            project="yqx-expressive-performance",
-            config=dict(self.config),
-            name=self._generate_model_identifier(self.config)
-        )
+        # wandb.init(
+        #     project="yqx-expressive-performance",
+        #     config=dict(self.config),
+        #     name=self._generate_model_identifier(self.config)
+        # )
         
         self.train_features, self.train_targets, self.val_features, self.val_targets = self.load_data()
 
-        device = config.model.get('device', 'cpu')
+        device = config.model.get('device', 'cuda:0')
         if device.startswith('cuda:'):
             # Check if specified GPU is available
             gpu_id = int(device.split(':')[1])
@@ -143,7 +212,8 @@ class YQXSystem:
                 num_layers=flow_config.get('num_layers', 2),
                 flow_matcher_type=flow_config.get('flow_matcher_type', 'standard'),
                 sigma=flow_config.get('sigma', 0.01),
-                device=device
+                device=device,
+                use_audiocraft=flow_config.get('use_audiocraft', False)
             )
         elif config.model.type == "bvae":
             bvae_config = config.model.bvae
@@ -357,7 +427,11 @@ class YQXSystem:
             matched_snote_array = snote_array[np.isin(snote_array['id'], snote_ids)]
             
             if len(matched_snote_array) > 0 and len(parameters) > 0:
-                note_array_pairs.append((matched_snote_array, parameters))
+                # Extract dynamic context for this piece
+                dynamic_mapper = DynamicContextMapper()
+                dynamic_context = dynamic_mapper.map_dynamics_to_notes(score_part, matched_snote_array)
+                
+                note_array_pairs.append((matched_snote_array, parameters, dynamic_context))
                 
             # Memory cleanup after each performance
             del score, score_part, snote_array, performance, alignment
@@ -407,8 +481,17 @@ class YQXSystem:
                 
                 matched_snote_array = snote_array[matched_note_idxs[:, 0]]
                 matched_pnote_array = pnote_array[matched_note_idxs[:, 1]]
+
+                dynamic_mapper = DynamicContextMapper()
+                dynamic_context = dynamic_mapper.map_dynamics_to_notes(score_part, snote_array)
                 
-                note_array_pairs.append((matched_snote_array, parameters))
+                # Filter dynamic context to only include matched notes
+                matched_dynamic_context = {}
+                for note_id in matched_snote_array['id']:
+                    if note_id in dynamic_context:
+                        matched_dynamic_context[note_id] = dynamic_context[note_id]
+                
+                note_array_pairs.append((matched_snote_array, parameters, matched_dynamic_context))
         
         return note_array_pairs
 
@@ -519,7 +602,11 @@ class YQXSystem:
                     assert len(matched_snote_array) == len(parameters), "Length mismatch after filtering"
                 
                 if len(matched_snote_array) > 0 and len(parameters) > 0:
-                    note_array_pairs.append((matched_snote_array, parameters))
+                    # Extract dynamic context for this piece
+                    dynamic_mapper = DynamicContextMapper()
+                    dynamic_context = dynamic_mapper.map_dynamics_to_notes(score, matched_snote_array)
+                    
+                    note_array_pairs.append((matched_snote_array, parameters, dynamic_context))
                     
             except Exception as e:
                 print(f"Error processing ATEPP file {a_path}: {e}")
@@ -583,7 +670,7 @@ class YQXSystem:
         context_features = None
         targets = None
         
-        for idx, (score_notes, perf_params) in enumerate(tqdm(note_pairs, desc=f"Processing {dataset_name}")):
+        for idx, (score_notes, perf_params, dynamic_context) in enumerate(tqdm(note_pairs, desc=f"Processing {dataset_name}")):
             if not self.config.train.enabled and idx == 1:
                 print("Skipping further data loading for training, only using first piece")
                 break
@@ -595,7 +682,8 @@ class YQXSystem:
             # Always extract with full features (including extended context)
             expressive_notes = full_extractor.extract_features(
                 score_notes, 
-                perf_params
+                perf_params,
+                dynamic_context=dynamic_context  # Pass dynamic context
             )
             
             if idx == 0 and self.config.output.plot_targets:
@@ -744,7 +832,7 @@ class YQXSystem:
         print(f"Loaded {len(note_pairs)} score-performance pairs")
 
         # Log dataset info
-        wandb.log({"dataset_size": len(note_pairs)})
+        # wandb.log({"dataset_size": len(note_pairs)})
         
         context_features = np.vstack(context_features)
         targets = np.vstack(targets)
@@ -785,6 +873,7 @@ class YQXSystem:
             flow_config = self.config.model.flow
             train_kwargs['epochs'] = flow_config.get('epochs', 100)
             train_kwargs['batch_size'] = flow_config.get('batch_size', 32)
+            train_kwargs['learning_rate'] = flow_config.get('learning_rate', 1e-3)
         elif self.config.model.type == "xgboost":
             # keeps it for the interface consistent
             train_kwargs['epochs'] = 1
@@ -821,7 +910,14 @@ class YQXSystem:
         self.save_model(save_best=True)
         
         # Finish wandb run
-        wandb.finish()
+        # wandb.finish()
+
+    def get_dynamic_at_time(self, dynamics, time_beat):
+        for dyn in dynamics:
+            if hasattr(dyn, 'start') and hasattr(dyn, 'end'):
+                if dyn.start.t <= time_beat <= dyn.end.t:
+                    return dyn.text if hasattr(dyn, 'text') else str(dyn)
+        return ''
     
     def render_performance(self, musicxml_path: str = None, output_midi: str = None, initial_tempo: int = None):
         """Render expressive performance of a MusicXML score"""
@@ -832,9 +928,65 @@ class YQXSystem:
             self.feature_extractor = FeatureExtractor(self.config.model.feature_experiment)
         
         # Load score
-        score_part = pt.load_musicxml(musicxml_path)[0]
-        score_notes = score_part.note_array()
+        score_part = pt.load_score(musicxml_path)[0]
+        notes = score_part.notes_tied
+        dynamics = score_part.dynamics
+        # for note in notes:
+        #     if note.articulations:
+        #         print(f"Note {note.midi_pitch} at beat {note.start.t} has articulations: {note.articulations}")
+        a = score_part.note_array()
+
+
+        fields = [("onset_beat", "f4"),
+                  ("duration_beat", "f4"),
+                  ("pitch", "i4"),
+                  ("voice", "i4"),
+                  ("id", "U50"),
+                  ("articulations", "U50"),
+                  ("dynamic", "U50")]
+
+        beat_map = score_part.beat_map
+        N = len(notes)
+        score_notes = np.zeros(N, dtype=fields)
         
+        for i, n in enumerate(notes):
+            # Basic note info
+            score_notes[i]['onset_beat'] = beat_map(n.start.t)
+            score_notes[i]['duration_beat'] = a[i]['duration_beat']
+            score_notes[i]['pitch'] = n.midi_pitch
+            score_notes[i]['voice'] = n.voice
+            score_notes[i]['id'] = a[i]['id']
+            score_notes[i]['articulations'] = ','.join(n.articulations) if n.articulations else ''
+            
+            note_time = beat_map(n.start.t)
+            score_notes[i]['dynamic'] = self.get_dynamic_at_time(dynamics, note_time)
+
+        # print(score_notes.dtype.names)
+        # print(score_notes[:5])
+
+
+        if initial_tempo == 120:
+            if hasattr(score_part, 'tempos') and score_part.tempos:
+                initial_tempo = score_part.tempos[0].value
+                print(f"Score tempo: {initial_tempo}")
+            elif hasattr(score_part, 'tempo') and score_part.tempo:
+                initial_tempo = score_part.tempo
+                print(f"Score tempo: {initial_tempo}")
+            elif hasattr(score_part, 'metronome_marks') and score_part.metronome_marks:
+                for mm in score_part.metronome_marks:
+                    if hasattr(mm, 'tempo'):
+                        initial_tempo = mm.tempo
+                        print(f"Score tempo: {initial_tempo}")
+            else:
+                initial_tempo = 120
+                print(f"Initial tempo: {initial_tempo}")
+        else:
+            print(f"Initial tempo: {initial_tempo}")
+        
+        initial_tempo = float(initial_tempo)
+        
+
+
         # Extract features
         print("Extracting features...")
         expressive_notes = self.feature_extractor.extract_features(
@@ -885,7 +1037,7 @@ class YQXSystem:
                 voice=note.voice,
                 beat_period=float(np.clip(predictions[i, 0], 0.3, 3.0)),
                 timing=float(np.clip(predictions[i, 1], -0.5, 0.5)),
-                velocity=np.clip(predictions[i, 2], 0, 127),
+                velocity=float(np.clip(predictions[i, 2], 0, 127)),
                 articulation_log=float(np.clip(predictions[i, 3], -2.0, 1.0))
             )
             predicted_expressive_notes.append(new_note)
@@ -914,7 +1066,6 @@ class YQXSystem:
             ('articulation_log', 'f4')
         ])
         
-
         # Apply predicted expressive parameters by matching notes
         for pred_note in predicted_expressive_notes:
             # Find matching note in score array
@@ -937,7 +1088,7 @@ class YQXSystem:
         
         # scale the time parameters with user provided tempo
         performance_params['beat_period'] = performance_params['beat_period'] / (initial_tempo / 120)
-        performance_params['timing'] = performance_params['timing'] / initial_tempo / 120
+        performance_params['timing'] = performance_params['timing'] / (initial_tempo / 120)
         
         # Use partitura's decode_performance to create performed part
         performed_part = pt.musicanalysis.decode_performance(

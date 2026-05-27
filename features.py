@@ -90,6 +90,14 @@ class FeatureExperimentConfig:
                 'log_time_since_chord_character', 'log_time_since_chord_size'
             ]
         },
+        'additional': {
+            'context_short': [
+                'has_accent', 'has_staccato', 'articulation_type', 
+                'accent_velocity_ratio', 'accent_strength', 
+                'staccato_duration_ratio', 'staccato_duration', 'staccato_velocity_compensation',
+                'has_dynamic', 'dynamic_type', 'dynamic_strength', 'dynamic_direction', 'dynamic_contour'
+            ]
+        },
         'technical_indicators': {
             'context_extended': [
                 # Moving averages for pitch (all windows)
@@ -147,6 +155,9 @@ class FeatureExperimentConfig:
         ],
         'voice': [
             'chord_character_pressed', 'chord_size_pressed', 'chord_character', 'chord_size'
+        ],
+        'additional': [
+            'articulation_type', 'dynamic_type', 'dynamic_direction', 'dynamic_contour'
         ]
     }
     
@@ -154,19 +165,19 @@ class FeatureExperimentConfig:
     EXPERIMENT_CONFIGS = {
         'short_context': {
             'description': 'Short context features only',
-            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase'],
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'additional'],
             'context_levels': ['context_short'],
             'use_midihum': False
         },
         'long_context': {
             'description': 'Short + medium + long context features',
-            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase'],
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'additional'],
             'context_levels': ['context_short', 'context_medium', 'context_long'],
             'use_midihum': False
         },
         'full_context': {
             'description': 'All context levels (short + medium + long + extended)',
-            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'technical_indicators'],
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'additional', 'technical_indicators'],
             'context_levels': ['context_short', 'context_medium', 'context_long', 'context_extended'],
             'use_midihum': True
         }
@@ -249,6 +260,19 @@ class FeatureExtractor:
                 'Reversal': 2,
                 'Registral_Return': 3,
                 'Intervallic_Duplication': 4
+            },
+            'articulation_type': {
+                'none': 0, 'accent': 1, 'staccato': 2, 'accent_staccato': 3
+            },
+            'dynamic_type': {
+                'none': 0, 'ppp': 1, 'pp': 2, 'p': 3, 'mp': 4, 'mf': 5, 'f': 6, 'ff': 7, 'fff': 8,
+                'crescendo': 9, 'decrescendo': 10, 'diminuendo': 11, 'sf': 12, 'sfz': 13
+            },
+            'dynamic_direction': {
+                'none': 0, 'maintain': 1, 'increase': 2, 'decrease': 3, 'diminishing': 4
+            },
+            'dynamic_contour': {
+                'none': 0, '+1': 1, '-1': 2, '-2': 3
             }
         }
         
@@ -268,6 +292,19 @@ class FeatureExtractor:
                 },
                 'chord_size': {
                     0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8
+                },
+                'articulation_type': {
+                    'none': 0, 'accent': 1, 'staccato': 2, 'accent_staccato': 3
+                },
+                'dynamic_type': {
+                    'none': 0, 'ppp': 1, 'pp': 2, 'p': 3, 'mp': 4, 'mf': 5, 'f': 6, 'ff': 7, 'fff': 8,
+                    'crescendo': 9, 'decrescendo': 10, 'diminuendo': 11, 'sf': 12, 'sfz': 13
+                },
+                'dynamic_direction': {
+                    'none': 0, 'maintain': 1, 'increase': 2, 'decrease': 3, 'diminishing': 4
+                },
+                'dynamic_contour': {
+                    'none': 0, '+1': 1, '-1': 2, '-2': 3
                 }
             })
         
@@ -559,7 +596,7 @@ class FeatureExtractor:
         return sorted(list(set(boundaries)))
     
     def extract_features(self, score_notes: np.ndarray, parameters: Optional[np.ndarray] = None, 
-                         plot: Optional[bool] = False) -> List[ExpressiveNote]:
+                         dynamic_context: Optional[Dict] = None, plot: Optional[bool] = False) -> List[ExpressiveNote]:
         """
         Extract comprehensive features from score and parameters (if available).
         Features are organized based on the current experiment configuration.
@@ -600,6 +637,7 @@ class FeatureExtractor:
                 onset_beat = note['onset_beat']
                 duration_beat = note['duration_beat']
                 voice = note['voice']
+                n_velocity = 0.5
                 
                 # ========================================
                 # PITCH FEATURES
@@ -630,6 +668,18 @@ class FeatureExtractor:
                     voice_notes, i, phrase_boundaries
                 )
                 
+                # ========================================
+                # ADDITIONAL FEATURES (ARTICULATION)
+                # ========================================
+                additional_features = self._extract_additional_features(
+                    voice_notes, score_notes, i, onset_beat, duration_beat, n_velocity
+                )
+                
+                note_id = note['id']
+                note_dynamic_context = dynamic_context.get(note_id, {}) if dynamic_context else {}
+                dynamic_features = self._extract_dynamic_features(note_dynamic_context, note, voice_notes, i, n_velocity)
+                additional_features.update(dynamic_features)
+
                 # ========================================
                 # EXPRESSIVE TARGETS
                 # ========================================
@@ -665,6 +715,9 @@ class FeatureExtractor:
                     # Phrase features
                     **phrase_features,
                     
+                    # Additional features
+                    **additional_features,
+
                     # Expressive targets
                     beat_period=beat_period,
                     timing=timing,
@@ -753,6 +806,23 @@ class FeatureExtractor:
                     phrase_length=row['phrase_length'],
                     ir_label=row['ir_label'],
                     ir_closure=row['ir_closure'],
+                    
+                    # Additional features (articulation)
+                    has_accent=row['has_accent'],
+                    has_staccato=row['has_staccato'],
+                    articulation_type=row['articulation_type'],
+                    accent_strength=row['accent_strength'],
+                    accent_velocity_ratio=row['accent_velocity_ratio'],
+                    staccato_duration_ratio=row['staccato_duration_ratio'],
+                    staccato_duration=row['staccato_duration'],
+                    staccato_velocity_compensation=row['staccato_velocity_compensation'],
+                    
+                    # Dynamic features
+                    has_dynamic=row['has_dynamic'],
+                    dynamic_type=row['dynamic_type'],
+                    dynamic_strength=row['dynamic_strength'],
+                    dynamic_direction=row['dynamic_direction'],
+                    dynamic_contour=row['dynamic_contour'],
                     
                     # Expressive targets
                     beat_period=row['beat_period'],
@@ -1319,8 +1389,155 @@ class FeatureExtractor:
         
         return "-".join(pattern)
     
-
+    def _extract_additional_features(self, voice_notes: np.ndarray, score_notes: np.ndarray, 
+                                   idx: int, onset_beat: float, duration_beat: float, velocity: float=0.5) -> dict:
+        features = {}
         
+        # Get articulation information from the note
+        note = voice_notes[idx]
+        
+        # Check for accent and staccato articulations
+        has_accent = False
+        has_staccato = False
+        
+        # Check if note has articulations attribute (from partitura)
+        if hasattr(note, 'articulations') and note.articulations:
+            for articulation in note.articulations:
+                if hasattr(articulation, 'type'):
+                    if articulation.type == 'accent':
+                        has_accent = True
+                    elif articulation.type == 'staccato':
+                        has_staccato = True
+        
+        # Basic articulation features
+        features['has_accent'] = has_accent
+        features['has_staccato'] = has_staccato
+        
+        # Determine articulation type
+        if has_accent and has_staccato:
+            features['articulation_type'] = 'accent_staccato'
+        elif has_accent:
+            features['articulation_type'] = 'accent'
+        elif has_staccato:
+            features['articulation_type'] = 'staccato'
+        else:
+            features['articulation_type'] = 'none'
+        
+        # Accent strength (if accent is present)
+        if has_accent:
+            features['accent_velocity_ratio'] = 1.1
+            features['accent_strength'] = velocity * features['accent_velocity_ratio']
+        else:
+            features['accent_velocity_ratio'] = 1.0
+            features['accent_strength'] = velocity
+        
+        # STACCATO FEATURES
+        if has_staccato:
+            features['staccato_duration_ratio'] = 0.80
+            features['staccato_duration'] = features['staccato_duration_ratio'] * duration_beat
+            
+            features['staccato_velocity_compensation'] = 1.05 * velocity  # 2% normalised velocity increase
+        else:
+            features['staccato_duration_ratio'] = 1.0
+            features['staccato_duration'] = features['staccato_duration_ratio'] * duration_beat
+            features['staccato_velocity_compensation'] = 1.0 * velocity
+        
+        
+        return features
+
+
+    def _extract_dynamic_features(self, dynamic_context: Dict, note: np.ndarray, 
+                            voice_notes: np.ndarray, idx: int, velocity: float=0.5) -> Dict:
+        """Extract dynamic-related features"""
+        features = {}
+        
+        # Basic dynamic presence
+        features['has_dynamic'] = bool(dynamic_context)
+        
+        if dynamic_context:
+            # Dynamic type and value
+            features['dynamic_type'] = dynamic_context.get('dynamic', 'none')
+            features['dynamic_strength'] = self._get_dynamic_strength(dynamic_context.get('dynamic', ''), velocity)
+            features['dynamic_direction'] = self._get_dynamic_direction(dynamic_context.get('dynamic', ''))
+            
+            # Dynamic contour
+            features['dynamic_contour'] = self._get_dynamic_contour(dynamic_context.get('dynamic', ''))
+            
+        else:
+            # Default values for notes without dynamics
+            features.update({
+                'dynamic_type': 'none',
+                'dynamic_strength': 0.5,  # Neutral
+                'dynamic_direction': 'maintain',
+                'dynamic_contour': 'none'
+            })
+        
+        return features
+    
+    def _get_dynamic_strength(self, dynamic_value: str, velocity: float=0.5) -> float:
+        """Convert dynamic marking to strength value (0.0 to 1.0)"""
+        dynamic_value = str(dynamic_value).lower().strip()
+        
+        # Constant loudness dynamics
+        if dynamic_value == 'pppp':
+            return 0.3*velocity
+        elif dynamic_value == 'ppp':
+            return 0.4*velocity
+        elif dynamic_value == 'pp':
+            return 0.5*velocity
+        elif dynamic_value == 'p':
+            return 0.6*velocity
+        elif dynamic_value == 'mp':
+            return 0.8*velocity
+        elif dynamic_value == 'mf':
+            return 1.2*velocity
+        elif dynamic_value == 'f':
+            return 1.4*velocity
+        elif dynamic_value == 'ff':
+            return 1.5*velocity
+        elif dynamic_value == 'fff':
+            return 1.6*velocity
+        elif dynamic_value == 'ffff':
+            return 1.7*velocity
+        elif dynamic_value in ['sf', 'sfz']:
+            return 1.15*velocity  # Sforzando is strong but brief
+
+        # Default neutral value
+        return 1.0*velocity
+    
+
+    def _get_dynamic_direction(self, dynamic_value: str) -> str:
+        """Determine dynamic direction from dynamic marking"""
+        dynamic_value = str(dynamic_value).lower().strip()
+        
+        if dynamic_value in ['ppp', 'pppp', 'pp', 'p', 'mp', 'mf', 'f', 'ff', 'fff', 'ffff', 'sf', 'sfz']:
+            return 'maintain'
+        
+        elif dynamic_value in ['crescendo', 'cresc.', 'cresc']:
+            return 'increase'
+        
+        elif dynamic_value in ['decrescendo', 'decresc.', 'decresc']:
+            return 'decrease'
+        
+        elif dynamic_value in ['diminuendo', 'dim.', 'dim']:
+            return 'diminishing'
+        
+        return 'maintain'
+    
+    
+    def _get_dynamic_contour(self, dynamic_value: str) -> str:
+        """Get dynamic contour pattern for given dynamic marking"""
+        dynamic_value = str(dynamic_value).lower().strip()
+        
+        # Simplified dynamic contour system
+        if dynamic_value in ['crescendo', 'cresc.', 'cresc']:
+            return '+1'
+        elif dynamic_value in ['decrescendo', 'decresc.', 'decresc']:
+            return '-1'
+        elif dynamic_value in ['diminuendo', 'dim.', 'dim']:
+            return '-2'
+        else:
+            return 'none'
 
 class MidiHumFeatureEngineer:
     """
