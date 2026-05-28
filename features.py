@@ -91,11 +91,19 @@ class FeatureExperimentConfig:
             ]
         },
         'additional': {
+            # Score-marking features extracted from MusicXML. The velocity-
+            # derived markings (accent_velocity_ratio, accent_strength,
+            # staccato_duration_ratio, staccato_duration,
+            # staccato_velocity_compensation) are intentionally NOT listed
+            # here: they are computed as functions of an input velocity
+            # placeholder and therefore conceptually leak target-side
+            # information. _extract_additional_features still computes them
+            # for backward compatibility, but they are excluded from the
+            # encoded feature vector.
             'context_short': [
-                'has_accent', 'has_staccato', 'articulation_type', 
-                'accent_velocity_ratio', 'accent_strength', 
-                'staccato_duration_ratio', 'staccato_duration', 'staccato_velocity_compensation',
-                'has_dynamic', 'dynamic_type', 'dynamic_strength', 'dynamic_direction', 'dynamic_contour'
+                'has_accent', 'has_staccato', 'articulation_type',
+                'has_dynamic', 'dynamic_type', 'dynamic_strength',
+                'dynamic_direction', 'dynamic_contour'
             ]
         },
         'technical_indicators': {
@@ -163,6 +171,12 @@ class FeatureExperimentConfig:
     
     # Predefined experiment configurations
     EXPERIMENT_CONFIGS = {
+        # 'additional' = score-marking features (articulation marks like
+        # accent/staccato and dynamic notations like pp/mf/ff read from
+        # MusicXML). Kept in all configs because comparable sequential
+        # baselines (e.g. VirtuosoNet) also consume marking annotations.
+        # See the 'additional' entry in FEATURE_DIMENSIONS above for which
+        # velocity-derived markings are excluded.
         'short_context': {
             'description': 'Short context features only',
             'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'additional'],
@@ -621,8 +635,14 @@ class FeatureExtractor:
                 'duration_ranks': np.argsort(np.argsort(voice_durations)) / len(voice_durations)
             }
         
-        # Pre-compute duration ranks for the entire piece
-        piece_duration_ranks = np.argsort(np.argsort(all_durations)) / len(all_durations)
+        # Sorted piece durations, used to look up each note's piece-wide
+        # duration rank via searchsorted inside _extract_rhythmic_features.
+        piece_duration_ranks = np.sort(all_durations)
+
+        # Maximum simultaneous-onset density across the piece. Used to
+        # normalise voice_density_ratio per paper §3.1.1.
+        unique_onsets, onset_counts = np.unique(score_notes['onset_beat'], return_counts=True)
+        piece_max_density = int(onset_counts.max()) if len(onset_counts) else 1
 
         expressive_notes = []
         
@@ -652,7 +672,8 @@ class FeatureExtractor:
                 # VOICE FEATURES  
                 # ========================================
                 voice_features = self._extract_voice_features(
-                    score_notes, voice_notes, i, pitch, onset_beat, voice_layers[i]
+                    score_notes, voice_notes, i, pitch, onset_beat, voice_layers[i],
+                    piece_max_density=piece_max_density,
                 )
                 
                 # ========================================
@@ -1221,8 +1242,9 @@ class FeatureExtractor:
         
         return features
     
-    def _extract_voice_features(self, score_notes: np.ndarray, voice_notes: np.ndarray, 
-                               idx: int, pitch: int, onset_beat: float, voice_layer: int) -> dict:
+    def _extract_voice_features(self, score_notes: np.ndarray, voice_notes: np.ndarray,
+                               idx: int, pitch: int, onset_beat: float, voice_layer: int,
+                               piece_max_density: int = 1) -> dict:
         """Extract voice-related features including cross-voice context"""
         features = {}
         
@@ -1258,9 +1280,12 @@ class FeatureExtractor:
             features['notes_below_avg_pitch'] = pitch
             features['notes_below_min_pitch'] = pitch
         
-        # Voice density
+        # Voice (onset) density. The ratio is normalised by the maximum
+        # simultaneous-onset density in the piece, matching the paper's
+        # §3.1.1 definition. (Previous code divided by the total number of
+        # notes in the piece, producing a vanishingly small number.)
         features['voice_density_at_onset'] = len(sounding_notes)
-        features['voice_density_ratio'] = len(sounding_notes) / max(1, len(score_notes))
+        features['voice_density_ratio'] = len(sounding_notes) / max(1, piece_max_density)
         
         # Cross-voice interval context
         if len(sounding_notes) > 0:
@@ -1314,42 +1339,45 @@ class FeatureExtractor:
         features['rhythmic_pattern_3step'] = self._get_rhythmic_pattern(voice_notes, idx, 3)
         features['rhythmic_pattern_5step'] = self._get_rhythmic_pattern(voice_notes, idx, 5)
         
-        # Beat position features use score measure context when available.
-        onset_beat = float(voice_notes[idx]["onset_beat"])
-        beat_tol = 0.1
-
-        if measure_info:
-            measure_start = float(measure_info["measure_start_beat"])
-            measure_length = float(measure_info["measure_length_beat"])
-            time_signature_beats = int(measure_info.get("time_signature_beats", round(measure_length)))
-            time_signature_beat_type = int(measure_info.get("time_signature_beat_type", 4))
-
-            position = onset_beat - measure_start
-            position = max(0.0, min(position, measure_length))
-            pulse_positions = self._get_meter_pulse_positions(
-                measure_length,
-                time_signature_beats,
-                time_signature_beat_type,
-            )
-
-            features["beat_position_in_measure"] = position / max(measure_length, 1e-6)
-            features["is_on_downbeat"] = abs(position) < beat_tol
-            features["is_on_beat"] = any(abs(position - pulse) < beat_tol for pulse in pulse_positions)
+        # Beat position features. Requires the score note_array to have been
+        # built with include_metrical_position=True and include_time_signature=True
+        # (see callers of extract_features). Falls back to a 4/4 assumption with
+        # a warning if those fields are missing.
+        note = voice_notes[idx]
+        onset_beat = note['onset_beat']
+        if 'rel_onset_div' in voice_notes.dtype.names and 'tot_measure_div' in voice_notes.dtype.names:
+            tot = note['tot_measure_div']
+            features['beat_position_in_measure'] = (note['rel_onset_div'] / tot) if tot > 0 else 0.0
+            features['is_on_downbeat'] = bool(note['is_downbeat']) if 'is_downbeat' in voice_notes.dtype.names \
+                else (note['rel_onset_div'] == 0)
+            # On-beat: position within the measure expressed in beats is integer-aligned.
+            beats_per_measure = note['ts_beats'] if 'ts_beats' in voice_notes.dtype.names else 4
+            beat_in_measure = features['beat_position_in_measure'] * beats_per_measure
+            features['is_on_beat'] = abs(beat_in_measure - round(beat_in_measure)) < 0.1
         else:
-            # Fallback, for scores without measure info.
-            features["beat_position_in_measure"] = (onset_beat % 4) / 4
-            features["is_on_downbeat"] = abs(onset_beat % 4) < beat_tol
-            features["is_on_beat"] = abs(onset_beat - round(onset_beat)) < beat_tol
-        
+            if not getattr(self, '_warned_no_time_sig', False):
+                print("[features] WARNING: score note_array missing metrical/time-signature "
+                      "fields; falling back to 4/4 beat-position approximation. Pass "
+                      "include_metrical_position=True, include_time_signature=True to "
+                      "score.note_array() to fix.")
+                self._warned_no_time_sig = True
+            features['beat_position_in_measure'] = (onset_beat % 4) / 4
+            features['is_on_beat'] = abs(onset_beat % 1) < 0.1
+            features['is_on_downbeat'] = abs(onset_beat % 4) < 0.1
+
         # Duration context
         features['duration_relative_to_voice_avg'] = duration_beat / voice_stats['avg_duration']
         features['duration_relative_to_piece_avg'] = duration_beat / piece_avg_duration
         features['duration_rank_in_voice'] = voice_stats['duration_ranks'][idx]
-        
-        # Find the corresponding piece duration rank (approximate)
-        piece_idx = np.searchsorted(np.sort(voice_notes['duration_beat']), duration_beat)
-        if piece_idx < len(piece_duration_ranks):
-            features['duration_rank_in_piece'] = piece_duration_ranks[piece_idx]
+
+        # Rank of this note's duration within the whole piece. The previous
+        # implementation searched a voice-scoped sorted array and indexed into
+        # a piece-scoped rank table, producing meaningless values. We now pass
+        # the sorted piece durations directly and compute the rank with one
+        # searchsorted call.
+        n = len(piece_duration_ranks)
+        if n > 0:
+            features['duration_rank_in_piece'] = float(np.searchsorted(piece_duration_ranks, duration_beat)) / n
         else:
             features['duration_rank_in_piece'] = 0.5
         
