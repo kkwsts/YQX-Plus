@@ -596,7 +596,7 @@ class FeatureExtractor:
         return sorted(list(set(boundaries)))
     
     def extract_features(self, score_notes: np.ndarray, parameters: Optional[np.ndarray] = None, 
-                         dynamic_context: Optional[Dict] = None, plot: Optional[bool] = False) -> List[ExpressiveNote]:
+                         dynamic_context: Optional[Dict] = None, measure_context: Optional[Dict] = None, plot: Optional[bool] = False) -> List[ExpressiveNote]:
         """
         Extract comprehensive features from score and parameters (if available).
         Features are organized based on the current experiment configuration.
@@ -638,6 +638,8 @@ class FeatureExtractor:
                 duration_beat = note['duration_beat']
                 voice = note['voice']
                 n_velocity = 0.5
+                note_id = note['id']
+                note_measure_context = measure_context.get(note_id, {}) if measure_context else {}
                 
                 # ========================================
                 # PITCH FEATURES
@@ -658,7 +660,7 @@ class FeatureExtractor:
                 # ========================================
                 rhythmic_features = self._extract_rhythmic_features(
                     voice_notes, i, duration_beat, piece_avg_duration, 
-                    voice_stats[voice_idx], piece_duration_ranks
+                    voice_stats[voice_idx], piece_duration_ranks, measure_info=note_measure_context
                 )
                 
                 # ========================================
@@ -675,7 +677,6 @@ class FeatureExtractor:
                     voice_notes, score_notes, i, onset_beat, duration_beat, n_velocity
                 )
                 
-                note_id = note['id']
                 note_dynamic_context = dynamic_context.get(note_id, {}) if dynamic_context else {}
                 dynamic_features = self._extract_dynamic_features(note_dynamic_context, note, voice_notes, i, n_velocity)
                 additional_features.update(dynamic_features)
@@ -1277,9 +1278,23 @@ class FeatureExtractor:
         
         return features
     
+    def _get_meter_pulse_positions(self, measure_length: float, numerator: int, denominator: int) -> List[float]:
+        """Return beat-pulse offsets inside a measure in the score's beat units."""
+        if measure_length <= 0:
+            return [0.0]
+
+        if denominator == 8 and numerator in (6, 9, 12):
+            pulse_count = numerator // 3
+            pulse_step = measure_length / max(1, pulse_count)
+            return [pulse_step * pulse_idx for pulse_idx in range(pulse_count)]
+
+        pulse_count = max(1, int(round(measure_length)))
+        pulse_step = measure_length / pulse_count
+        return [pulse_step * pulse_idx for pulse_idx in range(pulse_count)]
+
     def _extract_rhythmic_features(self, voice_notes: np.ndarray, idx: int, duration_beat: float,
                                   piece_avg_duration: float, voice_stats: dict, 
-                                  piece_duration_ranks: np.ndarray) -> dict:
+                                  piece_duration_ranks: np.ndarray, measure_info: Optional[Dict] = None) -> dict:
         """Extract comprehensive rhythmic features"""
         features = {}
         
@@ -1299,11 +1314,32 @@ class FeatureExtractor:
         features['rhythmic_pattern_3step'] = self._get_rhythmic_pattern(voice_notes, idx, 3)
         features['rhythmic_pattern_5step'] = self._get_rhythmic_pattern(voice_notes, idx, 5)
         
-        # Beat position features (simplified - would need measure information for full accuracy)
-        onset_beat = voice_notes[idx]['onset_beat']
-        features['beat_position_in_measure'] = (onset_beat % 4) / 4  # Assuming 4/4 time
-        features['is_on_beat'] = abs(onset_beat % 1) < 0.1  # Within 0.1 beats of a whole beat
-        features['is_on_downbeat'] = abs(onset_beat % 4) < 0.1  # Within 0.1 beats of measure start
+        # Beat position features use score measure context when available.
+        onset_beat = float(voice_notes[idx]["onset_beat"])
+        beat_tol = 0.1
+
+        if measure_info:
+            measure_start = float(measure_info["measure_start_beat"])
+            measure_length = float(measure_info["measure_length_beat"])
+            time_signature_beats = int(measure_info.get("time_signature_beats", round(measure_length)))
+            time_signature_beat_type = int(measure_info.get("time_signature_beat_type", 4))
+
+            position = onset_beat - measure_start
+            position = max(0.0, min(position, measure_length))
+            pulse_positions = self._get_meter_pulse_positions(
+                measure_length,
+                time_signature_beats,
+                time_signature_beat_type,
+            )
+
+            features["beat_position_in_measure"] = position / max(measure_length, 1e-6)
+            features["is_on_downbeat"] = abs(position) < beat_tol
+            features["is_on_beat"] = any(abs(position - pulse) < beat_tol for pulse in pulse_positions)
+        else:
+            # Fallback, for scores without measure info.
+            features["beat_position_in_measure"] = (onset_beat % 4) / 4
+            features["is_on_downbeat"] = abs(onset_beat % 4) < beat_tol
+            features["is_on_beat"] = abs(onset_beat - round(onset_beat)) < beat_tol
         
         # Duration context
         features['duration_relative_to_voice_avg'] = duration_beat / voice_stats['avg_duration']
@@ -1726,5 +1762,3 @@ class MidiHumFeatureEngineer:
         return pd.concat(
             [df] + [col.rename(name) for name, col in new_cols.items()], axis=1
         )
-
-

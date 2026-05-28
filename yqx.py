@@ -24,8 +24,8 @@ warnings.filterwarnings('ignore')
 
 from expressivenote import ExpressiveNote  
 from gmm import BayesianExpressiveModel
-# from bvae import BVAEExpressiveModel
-# from flow_JASCO import FMExpressiveModel
+from bvae import BVAEExpressiveModel
+from flow_JASCO import FMExpressiveModel
 from xgboost_model import XGBoostExpressiveModel
 from features import FeatureExtractor
 
@@ -80,6 +80,101 @@ def get_matched_notes(spart_note_array, ppart_note_array, alignment):
         )
 
     return np.array(matched_idxs)
+
+class MeasureContextMapper:
+    """Maps each note id to its containing measure in beat units."""
+
+    def _get_time_signature_at(self, part, timeline_time):
+        """Return the active (numerator, denominator) at a score timeline time."""
+        default_time_signature = (4, 4)
+
+        time_signature_map = getattr(part, "time_signature_map", None)
+        if callable(time_signature_map):
+            try:
+                ts = time_signature_map(timeline_time)
+                if ts is not None:
+                    if hasattr(ts, "beats") and hasattr(ts, "beat_type"):
+                        return int(ts.beats), int(ts.beat_type)
+                    if isinstance(ts, (tuple, list, np.ndarray)) and len(ts) >= 2:
+                        return int(ts[0]), int(ts[1])
+            except Exception:
+                pass
+
+        try:
+            time_signatures = list(getattr(part, "time_signatures", []))
+        except Exception:
+            time_signatures = []
+
+        if not time_signatures and hasattr(part, "iter_all"):
+            try:
+                time_signatures = [
+                    obj for obj in part.iter_all()
+                    if hasattr(obj, "beats") and hasattr(obj, "beat_type")
+                ]
+            except Exception:
+                time_signatures = []
+
+        active_time_signature = None
+        for ts in time_signatures:
+            start_time = getattr(getattr(ts, "start", None), "t", None)
+            if start_time is None:
+                continue
+            if start_time <= timeline_time:
+                active_time_signature = ts
+            else:
+                break
+
+        if active_time_signature is None:
+            return default_time_signature
+
+        try:
+            return (
+                int(getattr(active_time_signature, "beats")),
+                int(getattr(active_time_signature, "beat_type")),
+            )
+        except Exception:
+            return default_time_signature
+
+    def map_measures_to_notes(self, part, note_array):
+        beat_map = part.beat_map
+        measures = list(part.measures)
+
+        if not measures:
+            return {}
+
+        measure_spans = []
+        for idx, measure in enumerate(measures):
+            start_beat = float(beat_map(measure.start.t))
+            end_beat = float(beat_map(measure.end.t))
+            if end_beat <= start_beat:
+                continue
+            ts_beats, ts_beat_type = self._get_time_signature_at(part, measure.start.t)
+            measure_spans.append({
+                "measure_index": idx,
+                "measure_start_beat": start_beat,
+                "measure_end_beat": end_beat,
+                "measure_length_beat": end_beat - start_beat,
+                "time_signature_beats": ts_beats,
+                "time_signature_beat_type": ts_beat_type,
+            })
+
+        note_measure_map = {}
+        for note in note_array:
+            onset = float(note["onset_beat"])
+            note_id = note["id"]
+
+            for m in measure_spans:
+                if m["measure_start_beat"] <= onset < m["measure_end_beat"]:
+                    note_measure_map[note_id] = m
+                    break
+
+            # Include notes exactly on the final measure end.
+            if note_id not in note_measure_map and measure_spans:
+                last = measure_spans[-1]
+                if abs(onset - last["measure_end_beat"]) < 1e-6:
+                    note_measure_map[note_id] = last
+
+        return note_measure_map
 
 class DynamicContextMapper:
     """Maps dynamic markings to individual notes based on time overlap"""
@@ -177,21 +272,22 @@ class YQXSystem:
         self.feature_extractor = FeatureExtractor(experiment_config=feature_config)
 
         # Initialize wandb
-        # wandb.init(
-        #     project="yqx-expressive-performance",
-        #     config=dict(self.config),
-        #     name=self._generate_model_identifier(self.config)
-        # )
+        wandb.init(
+            project="yqx-expressive-performance",
+            config=dict(self.config),
+            name=self._generate_model_identifier(self.config)
+        )
         
         self.train_features, self.train_targets, self.val_features, self.val_targets = self.load_data()
 
         device = config.model.get('device', 'cuda:0')
-        if device.startswith('cuda:'):
-            # Check if specified GPU is available
-            gpu_id = int(device.split(':')[1])
-            if gpu_id >= torch.cuda.device_count():
+        if device.startswith("cuda:"):
+            gpu_id = int(device.split(":")[1])
+            if not torch.cuda.is_available() or gpu_id >= torch.cuda.device_count():
                 print(f"Warning: GPU {gpu_id} not available, using CPU instead")
                 device = "cpu"
+            else:
+                print(f"Using GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}")
 
         # Initialize model based on config
         if config.model.type == "gmm":
@@ -226,6 +322,8 @@ class YQXSystem:
                 num_layers=bvae_config.get('num_layers', 2),
                 beta=bvae_config.get('beta', 4.0),
                 gamma=bvae_config.get('gamma', 1000.0),
+                max_capacity=bvae_config.get('max_capacity', 10.0),
+                capacity_max_iter=bvae_config.get('capacity_max_iter', 50000),
                 use_midihum=config.model.use_midihum_features,
                 learning_rate=bvae_config.get('learning_rate', 0.001),
                 device= device
@@ -431,7 +529,10 @@ class YQXSystem:
                 dynamic_mapper = DynamicContextMapper()
                 dynamic_context = dynamic_mapper.map_dynamics_to_notes(score_part, matched_snote_array)
                 
-                note_array_pairs.append((matched_snote_array, parameters, dynamic_context))
+                measure_mapper = MeasureContextMapper()
+                measure_context = measure_mapper.map_measures_to_notes(score_part, matched_snote_array)
+
+                note_array_pairs.append((matched_snote_array, parameters, dynamic_context, measure_context))
                 
             # Memory cleanup after each performance
             del score, score_part, snote_array, performance, alignment
@@ -484,14 +585,16 @@ class YQXSystem:
 
                 dynamic_mapper = DynamicContextMapper()
                 dynamic_context = dynamic_mapper.map_dynamics_to_notes(score_part, snote_array)
-                
+                measure_mapper = MeasureContextMapper()
+                measure_context = measure_mapper.map_measures_to_notes(score_part, snote_array)
+
                 # Filter dynamic context to only include matched notes
                 matched_dynamic_context = {}
                 for note_id in matched_snote_array['id']:
                     if note_id in dynamic_context:
                         matched_dynamic_context[note_id] = dynamic_context[note_id]
                 
-                note_array_pairs.append((matched_snote_array, parameters, matched_dynamic_context))
+                note_array_pairs.append((matched_snote_array, parameters, matched_dynamic_context, measure_context))
         
         return note_array_pairs
 
@@ -605,8 +708,10 @@ class YQXSystem:
                     # Extract dynamic context for this piece
                     dynamic_mapper = DynamicContextMapper()
                     dynamic_context = dynamic_mapper.map_dynamics_to_notes(score, matched_snote_array)
+                    measure_mapper = MeasureContextMapper()
+                    measure_context = measure_mapper.map_measures_to_notes(score, matched_snote_array)
                     
-                    note_array_pairs.append((matched_snote_array, parameters, dynamic_context))
+                    note_array_pairs.append((matched_snote_array, parameters, dynamic_context, measure_context))
                     
             except Exception as e:
                 print(f"Error processing ATEPP file {a_path}: {e}")
@@ -627,6 +732,10 @@ class YQXSystem:
             note_pairs: List of (score_notes, perf_params) tuples
             dataset_name: Name of the dataset ('v422', 'asap', 'atepp')
         """
+        if len(note_pairs) == 0:
+            print(f"No {dataset_name} note pairs available; skipping feature extraction.")
+            return None, None
+
         # Always cache with full features (including extended context)
         cache_file = os.path.join(self.config.output.artifacts_dir, 
                                 f"{dataset_name}_features_full_cache.pkl")
@@ -670,7 +779,17 @@ class YQXSystem:
         context_features = None
         targets = None
         
-        for idx, (score_notes, perf_params, dynamic_context) in enumerate(tqdm(note_pairs, desc=f"Processing {dataset_name}")):
+        for idx, note_pair in enumerate(tqdm(note_pairs, desc=f"Processing {dataset_name}")):
+            if len(note_pair) == 4:
+                score_notes, perf_params, dynamic_context, measure_context = note_pair
+            elif len(note_pair) == 3:
+                score_notes, perf_params, dynamic_context = note_pair
+                measure_context = {}
+            else:
+                score_notes, perf_params = note_pair
+                dynamic_context = {}
+                measure_context = {}
+
             if not self.config.train.enabled and idx == 1:
                 print("Skipping further data loading for training, only using first piece")
                 break
@@ -683,7 +802,8 @@ class YQXSystem:
             expressive_notes = full_extractor.extract_features(
                 score_notes, 
                 perf_params,
-                dynamic_context=dynamic_context  # Pass dynamic context
+                dynamic_context=dynamic_context,
+                measure_context=measure_context
             )
             
             if idx == 0 and self.config.output.plot_targets:
@@ -809,31 +929,40 @@ class YQXSystem:
         """Load and split data into training and validation sets"""
         
         print("Loading training data...")
-        note_pairs = [] 
+        total_note_pairs = 0
         context_features = []
         targets = []
         if self.use_vienna4x22: # default, most time will use 
-            note_pairs = self.get_v422_aligned_note_arrays('train')
-            context_features_vienna, targets_vienna = self.get_dataset_features(note_pairs, 'v422')
-            context_features.append(context_features_vienna)
-            targets.append(targets_vienna)
+            v422_note_pairs = self.get_v422_aligned_note_arrays('train')
+            total_note_pairs += len(v422_note_pairs)
+            context_features_vienna, targets_vienna = self.get_dataset_features(v422_note_pairs, 'v422')
+            if context_features_vienna is not None:
+                context_features.append(context_features_vienna)
+                targets.append(targets_vienna)
         elif self.asap_dir is not None:
             print("Loading ASAP training data...")
-            note_pairs.extend(self.get_asap_aligned_note_arrays('train', self.asap_split_csv))
-            context_features_asap, targets_asap = self.get_dataset_features(note_pairs, 'asap')
-            context_features.append(context_features_asap)
-            targets.append(targets_asap)
+            asap_note_pairs = self.get_asap_aligned_note_arrays('train', self.asap_split_csv)
+            total_note_pairs += len(asap_note_pairs)
+            context_features_asap, targets_asap = self.get_dataset_features(asap_note_pairs, 'asap')
+            if context_features_asap is not None:
+                context_features.append(context_features_asap)
+                targets.append(targets_asap)
         if self.atepp_dir is not None:
             print("Loading ATEPP training data...")
-            note_pairs.extend(self.get_atepp_aligned_note_arrays('train', self.atepp_meta_csv))
-            context_features_atepp, targets_atepp = self.get_dataset_features(note_pairs, 'atepp')
-            context_features.append(context_features_atepp)
-            targets.append(targets_atepp)
-        print(f"Loaded {len(note_pairs)} score-performance pairs")
+            atepp_note_pairs = self.get_atepp_aligned_note_arrays('train', self.atepp_meta_csv)
+            total_note_pairs += len(atepp_note_pairs)
+            context_features_atepp, targets_atepp = self.get_dataset_features(atepp_note_pairs, 'atepp')
+            if context_features_atepp is not None:
+                context_features.append(context_features_atepp)
+                targets.append(targets_atepp)
+        print(f"Loaded {total_note_pairs} score-performance pairs")
 
         # Log dataset info
         # wandb.log({"dataset_size": len(note_pairs)})
         
+        if not context_features:
+            raise ValueError("No training features were loaded. Check dataset paths and enabled datasets.")
+
         context_features = np.vstack(context_features)
         targets = np.vstack(targets)
         # print(f"Total features shape: {context_features.shape}, Total targets shape: {targets.shape}")
@@ -909,8 +1038,8 @@ class YQXSystem:
         # Save final best model (models already track best internally)
         self.save_model(save_best=True)
         
-        # Finish wandb run
-        # wandb.finish()
+        if wandb.run is not None:
+            wandb.finish()
 
     def get_dynamic_at_time(self, dynamics, time_beat):
         for dyn in dynamics:
@@ -960,7 +1089,6 @@ class YQXSystem:
             
             note_time = beat_map(n.start.t)
             score_notes[i]['dynamic'] = self.get_dynamic_at_time(dynamics, note_time)
-
         # print(score_notes.dtype.names)
         # print(score_notes[:5])
 
@@ -989,8 +1117,14 @@ class YQXSystem:
 
         # Extract features
         print("Extracting features...")
+        dynamic_mapper = DynamicContextMapper()
+        dynamic_context = dynamic_mapper.map_dynamics_to_notes(score_part, score_notes)
+        measure_mapper = MeasureContextMapper()
+        measure_context = measure_mapper.map_measures_to_notes(score_part, score_notes)
         expressive_notes = self.feature_extractor.extract_features(
-            score_notes
+            score_notes,
+            dynamic_context=dynamic_context,
+            measure_context=measure_context
         )
         # Predict expressive parameters (model-agnostic)
         print("Predicting expressive parameters...")
