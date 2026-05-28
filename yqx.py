@@ -483,8 +483,7 @@ class YQXSystem:
             try:
                 score = pt.load_musicxml(score_path)
                 score_part = score[0] if isinstance(score, list) else score.parts[0]
-                snote_array = score_part.note_array(
-                    include_metrical_position=True, include_time_signature=True)
+                snote_array = score_part.note_array()
             except Exception as e:
                 print(f"Error loading score {score_path}: {e}")
                 continue
@@ -510,8 +509,7 @@ class YQXSystem:
                 and "-" not in str(snote_array['id'][0])):
                 # unfold the score if need
                 score_part = pt.score.unfold_part_maximal(pt.score.merge_parts(score.parts))
-                snote_array = score_part.note_array(
-                    include_metrical_position=True, include_time_signature=True)
+                snote_array = score_part.note_array()
             
             # Encode performance parameters using partitura
             parameters, snote_ids = pt.musicanalysis.encode_performance(
@@ -577,8 +575,7 @@ class YQXSystem:
                 
                 performed_part, alignment = pt.load_match(match_fn)
                 
-                snote_array = score_part.note_array(
-                    include_metrical_position=True, include_time_signature=True)
+                snote_array = score_part.note_array()
                 pnote_array = performed_part.note_array()
                 matched_note_idxs = get_matched_notes(snote_array, pnote_array, alignment)
                 parameters, _ = pt.musicanalysis.encode_performance(snote_array, pnote_array, alignment)
@@ -684,8 +681,7 @@ class YQXSystem:
                     continue
                 
                 # Get score note array and filter to matched notes
-                snote_array = score.note_array(
-                    include_metrical_position=True, include_time_signature=True)
+                snote_array = score.note_array()
                 matched_snote_array = snote_array[np.isin(snote_array['id'], snote_ids)]
                 
                 # sometimes the matched_snotes_array are shorter after the filtering (some id misfound?) so
@@ -1194,8 +1190,7 @@ class YQXSystem:
         
         # Get the score note array (metrical/time-sig fields needed for the
         # rhythm features in features.py)
-        score_note_array = score_part.note_array(
-            include_metrical_position=True, include_time_signature=True)
+        score_note_array = score_part.note_array()
         
         # Create performance parameter array for the full score
         # Initialize with default values
