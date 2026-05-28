@@ -91,11 +91,19 @@ class FeatureExperimentConfig:
             ]
         },
         'additional': {
+            # Score-marking features extracted from MusicXML. The velocity-
+            # derived markings (accent_velocity_ratio, accent_strength,
+            # staccato_duration_ratio, staccato_duration,
+            # staccato_velocity_compensation) are intentionally NOT listed
+            # here: they are computed as functions of an input velocity
+            # placeholder and therefore conceptually leak target-side
+            # information. _extract_additional_features still computes them
+            # for backward compatibility, but they are excluded from the
+            # encoded feature vector.
             'context_short': [
-                'has_accent', 'has_staccato', 'articulation_type', 
-                'accent_velocity_ratio', 'accent_strength', 
-                'staccato_duration_ratio', 'staccato_duration', 'staccato_velocity_compensation',
-                'has_dynamic', 'dynamic_type', 'dynamic_strength', 'dynamic_direction', 'dynamic_contour'
+                'has_accent', 'has_staccato', 'articulation_type',
+                'has_dynamic', 'dynamic_type', 'dynamic_strength',
+                'dynamic_direction', 'dynamic_contour'
             ]
         },
         'technical_indicators': {
@@ -163,28 +171,27 @@ class FeatureExperimentConfig:
     
     # Predefined experiment configurations
     EXPERIMENT_CONFIGS = {
-        # NOTE: 'additional' (score-marking features — explicit dynamics like
-        # pp/f and articulation marks like accent/staccato read from MusicXML)
-        # is intentionally excluded from all ablation configs. The paper
-        # claims four feature categories (pitch, harmony/voice, rhythm,
-        # phrase); leaking score markings into the input would (a) violate
-        # that claim and (b) give YQX+ an unfair signal that the sequential
-        # baselines (DExter, VirtuosoNet) do not receive.
+        # 'additional' = score-marking features (articulation marks like
+        # accent/staccato and dynamic notations like pp/mf/ff read from
+        # MusicXML). Kept in all configs because comparable sequential
+        # baselines (e.g. VirtuosoNet) also consume marking annotations.
+        # See the 'additional' entry in FEATURE_DIMENSIONS above for which
+        # velocity-derived markings are excluded.
         'short_context': {
             'description': 'Short context features only',
-            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase'],
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'additional'],
             'context_levels': ['context_short'],
             'use_midihum': False
         },
         'long_context': {
             'description': 'Short + medium + long context features',
-            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase'],
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'additional'],
             'context_levels': ['context_short', 'context_medium', 'context_long'],
             'use_midihum': False
         },
         'full_context': {
             'description': 'All context levels (short + medium + long + extended)',
-            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'technical_indicators'],
+            'dimensions': ['pitch', 'voice', 'rhythm', 'phrase', 'additional', 'technical_indicators'],
             'context_levels': ['context_short', 'context_medium', 'context_long', 'context_extended'],
             'use_midihum': True
         }
